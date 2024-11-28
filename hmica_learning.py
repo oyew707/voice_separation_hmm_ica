@@ -12,13 +12,14 @@ __updated__ = "11/28/24"
 
 # Imports
 import tensorflow as tf
-from typing import Tuple, Optional
-from discreteHMM import DiscreteHMM
+from typing import Optional
 from ICA import ICA
+from discreteHMM import DiscreteHMM
 from ica_gradients import ICAGradients
 
-# Constants
 
+# Constants
+tf.config.run_functions_eagerly(True)
 
 class HMICALearner:
     """
@@ -65,7 +66,6 @@ class HMICALearner:
         # Initialize gradient computer
         self.grad_computer = ICAGradients(self.ica)
 
-
     @staticmethod
     def compute_convergence(new_ll: float, old_ll: float, init_ll: float,
                             delta: float = 1e-4) -> bool:
@@ -103,9 +103,7 @@ class HMICALearner:
         """
         history = {'hmm_ll': [], 'ica_ll': []}
 
-        # Initial likelihood computation
-        init_hmm_ll = self._compute_total_likelihood(x)
-        old_hmm_ll = init_hmm_ll
+        init_hmm_ll, new_hmm_ll = None, None
 
         # Main EM loop
         for iteration in range(max_iter):
@@ -115,11 +113,16 @@ class HMICALearner:
             beta_hat = self.hmm.calc_beta_hat(x, obs_prob)
             g = self.hmm.p_zt_xT(x, alpha_hat, beta_hat, c_t)
             responsibilities = g / tf.reduce_sum(g, axis=1, keepdims=True)
-
+            # Initial likelihood computation
+            if init_hmm_ll is None:
+                init_hmm_ll = self._compute_total_likelihood(x, responsibilities, alpha_hat, beta_hat, c_t)
+                old_hmm_ll = init_hmm_ll
+            else:
+                old_hmm_ll = new_hmm_ll
 
             # M-step for each state
             for k in range(self.k):
-                gamma_k = responsibilities[:, k]
+                gamma_k = responsibilities[1:, k]
 
                 # Initialize ICA iteration tracking
                 init_ica_ll = self._compute_ica_likelihood(x, k, gamma_k)
@@ -142,9 +145,10 @@ class HMICALearner:
 
                     # Check ICA convergence
                     new_ica_ll = self._compute_ica_likelihood(x, k, gamma_k)
-                    if self.compute_convergence(new_ica_ll, old_ica_ll,
-                                                init_ica_ll, ica_tol):
-                        break
+                    # if self.compute_convergence(new_ica_ll, old_ica_ll,
+                    #                             init_ica_ll, ica_tol):
+                    #     print('Converged ICA')
+                    #     break
 
                     old_ica_ll = new_ica_ll
                     ica_iter += 1
@@ -152,15 +156,15 @@ class HMICALearner:
                 history['ica_ll'].append(new_ica_ll)
 
             # Update HMM parameters
-            self._update_hmm_parameters(responsibilities)
+            self._update_hmm_parameters(x, responsibilities, alpha_hat, beta_hat, c_t)
 
             # Check HMM convergence
-            new_hmm_ll = self._compute_total_likelihood(x)
-            if self.compute_convergence(new_hmm_ll, old_hmm_ll,
-                                        init_hmm_ll, hmm_tol):
-                break
+            new_hmm_ll = self._compute_total_likelihood(x, responsibilities, alpha_hat, beta_hat, c_t)
+            # if self.compute_convergence(new_hmm_ll, old_hmm_ll,
+            #                             init_hmm_ll, hmm_tol):
+            #     print(f'Converged HMM')
+            #     break
 
-            old_hmm_ll = new_hmm_ll
             history['hmm_ll'].append(new_hmm_ll)
 
         return history
@@ -180,7 +184,7 @@ class HMICALearner:
         -------------------------------------------------------
         """
         log_probs = self.ica.compute_log_likelihood(x, state)
-        return tf.reduce_sum(gamma_k * log_probs)
+        return tf.cast(tf.reduce_sum(gamma_k * log_probs), tf.float32)
 
     def _update_parameters(self, state: int, W_grad: tf.Tensor,
                            R_grad: tf.Tensor, beta_grad: tf.Tensor,
@@ -188,6 +192,7 @@ class HMICALearner:
         """
         -------------------------------------------------------
         Updates model parameters using optimizers created on the fly
+        multiply -1 to gradients so it maximizes the functions
         -------------------------------------------------------
         Parameters:
             state - Current state index (int)
@@ -200,54 +205,52 @@ class HMICALearner:
         """
         # Update unmixing matrix
         W_optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rates['W'])
-        W_vars = [self.ica.W[state]]
-        W_grads = [W_grad]
-        W_optimizer.apply_gradients(zip(W_grads, W_vars))
+        W_optimizer.apply_gradients([(-1*W_grad, self.ica.W[state])])
 
         # Update source distribution parameters
         R_optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rates['R'])
-        R_vars = [self.ica.ge[state].R]
-        R_grads = [R_grad]
-        R_optimizer.apply_gradients(zip(R_grads, R_vars))
+        R_optimizer.apply_gradients([(-1*R_grad, self.ica.ge[state].R)])
 
-        beta_optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rates['beta'])
-        beta_vars = [self.ica.ge[state].beta]
-        beta_grads = [beta_grad]
-        beta_optimizer.apply_gradients(zip(beta_grads, beta_vars))
+        if self.grad_computer.use_analytical:
+            self.ica.ge[state].beta = beta_grad
+        else:
+            beta_optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rates['beta'])
+            beta_optimizer.apply_gradients([(-1*beta_grad, self.ica.ge[state].beta)])
 
         # Update GAR coefficients if using GAR
         if self.use_gar and C_grad is not None and (ica_iter + 1) % self.update_interval == 0:
             C_optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rates['C'])
-            C_vars = [self.ica.gar.C[state]]
-            C_grads = [C_grad]
-            C_optimizer.apply_gradients(zip(C_grads, C_vars))
+            C_optimizer.apply_gradients([(-1*C_grad, self.ica.gar.C[state])])
 
-    def _update_hmm_parameters(self, responsibilities: tf.Tensor):
+    def _update_hmm_parameters(self, x: tf.Tensor, responsibilities: tf.Tensor, alpha_hat: tf.Tensor,
+                               beta_hat: tf.Tensor, c_t: tf.Tensor):
         """
         -------------------------------------------------------
         Updates HMM transition and initial probability parameters
         -------------------------------------------------------
         Parameters:
+            x - Input data (tf.Tensor of shape [time_steps, x_dims])
             responsibilities - State responsibilities (tf.tensor array of shape
-                             [time_steps, k])
+                             [time_steps+1, k])
+            alpha_hat - Forward pass (tf.Tensor of shape [time_steps, k])
+            beta_hat - Backward pass (tf.Tensor of shape [time_steps, k])
+            c_t - Normalization constants (tf.Tensor of shape [time_steps])
         -------------------------------------------------------
         """
         # Update initial state probabilities
         self.hmm.pi = responsibilities[0]
 
         # Update transition probabilities
-        T = len(responsibilities)
-        A = tf.zeros((self.k, self.k))
-
-        for t in range(T - 1):
-            A += tf.keras.ops.outer(responsibilities[t], responsibilities[t + 1])
+        A = tf.reduce_sum(self._compute_joint_state_prob(x, alpha_hat, beta_hat, c_t), axis=0)
 
         # Normalize
-        row_sums = A.sum(axis=1, keepdims=True)
-        row_sums[row_sums == 0] = 1  # Avoid division by zero
+        row_sums = tf.reduce_sum(A, axis=1)
+        # row_sums[row_sums == 0] = 1  # Avoid division by zero
+        row_sums = tf.where(tf.equal(row_sums, 0), tf.ones_like(row_sums), row_sums)
         self.hmm.transition_matrix = A / row_sums
 
-    def _compute_total_likelihood(self, x: tf.Tensor, responsibilities: tf.Tensor) -> float:
+    def _compute_total_likelihood(self, x: tf.Tensor, responsibilities: tf.Tensor, alpha_hat: tf.Tensor,
+                                  beta_hat: tf.Tensor, c_t: tf.Tensor) -> float:
         """
         -------------------------------------------------------
         Computes complete joint log-likelihood of the HMICA model:
@@ -257,11 +260,15 @@ class HMICALearner:
         -------------------------------------------------------
         Parameters:
             x - Input data (tf.Tensor of shape [time_steps, x_dims])
+            responsibilities - State responsibilities (tf.Tensor of shape [time_steps+1, K])
+            alpha_hat - Forward pass (tf.Tensor of shape [time_steps, K])
+            beta_hat - Backward pass (tf.Tensor of shape [time_steps, K])
+            c_t - Normalization constants (tf.Tensor of shape [time_steps])
         Returns:
             ll - Complete joint log-likelihood value (float)
         -------------------------------------------------------
         """
-        T = len(x)
+        T = x.shape[0]
 
         # 1. Initial state probabilities: ∑_(k=1)^K γ_k(0) log π_k
         initial_ll = tf.reduce_sum(
@@ -270,14 +277,9 @@ class HMICALearner:
 
         # 2. Transition probabilities:
         # ∑_(t=1)^T ∑_(k'=1)^K ∑_(k=1)^K p(z_(t,k'),z_(t-1,k)|x_(1:T)) log A_(k,k')
-        transition_ll = 0.0
-        for t in range(1, T):
-            # Compute joint probability of consecutive states
-            joint_prob = self._compute_joint_state_prob(x, t, responsibilities)
-            # Add to log-likelihood
-            transition_ll += tf.reduce_sum(
-                joint_prob * tf.math.log(self.hmm.transition_matrix)
-            )
+        joint_prob = self._compute_joint_state_prob(x, alpha_hat, beta_hat, c_t) * tf.math.log(
+            self.hmm.transition_matrix)
+        transition_ll = tf.reduce_sum(joint_prob)
 
         # 3. ICA emission probabilities: ∑_(t=1)^T ∑_(k=1)^K γ_k(t) log p(x_t|z_t=k)
         emission_ll = 0.0
@@ -285,12 +287,12 @@ class HMICALearner:
             # Get log-likelihood for current state
             state_ll = self.ica.compute_log_likelihood(x, k)
             # Weight by state responsibilities
-            emission_ll += tf.reduce_sum(responsibilities[:, k] * state_ll)
+            emission_ll += tf.reduce_sum(responsibilities[1:, k] * state_ll)
 
-        return float(initial_ll + transition_ll + emission_ll)
+        return tf.cast(initial_ll + transition_ll + emission_ll, tf.float32)
 
-    def _compute_joint_state_prob(self, x: tf.Tensor, t: int,
-                                  responsibilities: tf.Tensor) -> tf.Tensor:
+    def _compute_joint_state_prob(self, x: tf.Tensor, alpha_hat: tf.Tensor, beta_hat: tf.Tensor,
+                                  c_t: tf.Tensor) -> tf.Tensor:
         """
         -------------------------------------------------------
         Computes joint probability p(z_t,z_{t-1}|x_{1:T}) using forward-backward
@@ -298,32 +300,16 @@ class HMICALearner:
         -------------------------------------------------------
         Parameters:
             x - Input data (tf.Tensor of shape [time_steps, x_dims])
-            t - Current time step (int)
-            responsibilities - State responsibilities (tf.tensor of shape [T, K])
+            alpha_hat - Forward pass (tf.Tensor of shape [time_steps, K])
+            beta_hat - Backward pass (tf.Tensor of shape [time_steps, K])
+            c_t - Normalization constants (tf.Tensor of shape [time_steps])
         Returns:
             joint_prob - Joint state probabilities (tf.Tensor of shape [K, K])
         -------------------------------------------------------
         """
-
         # Get forward-backward variables
-        def obs_prob(state: int, xt: tf.Tensor) -> float:
-            return float(self.ica.compute_likelihood(tf.expand_dims(xt, 0), state))
+        obs_prob = lambda state, x: self.ica.compute_likelihood(x, state)
 
-        alpha_hat, c_t = self.hmm.calc_alpha_hat(x, obs_prob)
-        beta_hat = self.hmm.calc_beta_hat(x, obs_prob)
-
-        # Compute joint probability for all state pairs
-        joint_prob = tf.zeros((self.k, self.k))
-        for k in range(self.k):
-            for k_prime in range(self.k):
-                # p(z_t=k',z_{t-1}=k|x_{1:T}) =
-                # α_{t-1}(k) * A_{k,k'} * p(x_t|z_t=k') * β_t(k') / c_t
-                joint_prob[k, k_prime] = (
-                        alpha_hat[t - 1, k] *
-                        self.hmm.transition_matrix[k, k_prime] *
-                        obs_prob(k_prime, x[t]) *
-                        beta_hat[t, k_prime] /
-                        c_t[t]
-                )
+        joint_prob = self.hmm.p_zt_zt1_xt(x, alpha_hat, beta_hat, c_t, obs_prob)
 
         return joint_prob

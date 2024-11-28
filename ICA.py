@@ -12,9 +12,7 @@ from typing import Optional
 
 # Imports
 import tensorflow as tf
-from scipy.special import gamma
 from generalizedAR import GeneralizedAutoRegressive
-import numpy as np
 
 # Constants
 
@@ -53,7 +51,7 @@ class GeneralizedExponential:
             pdf_values - Probability density values (tf.Tensor of same shape as input)
         -------------------------------------------------------
         """
-        Z = (self.R * tf.pow(self.beta, 1 / self.R)) / (2 * tf.cast(gamma(1 / self.R), tf.float32))
+        Z = (self.R * tf.pow(self.beta, 1 / self.R)) / (2 * tf.exp(tf.math.lgamma(1 / self.R)))
         exp_term = tf.exp(-self.beta * tf.pow(tf.abs(a), self.R))
         return Z * exp_term
 
@@ -117,13 +115,13 @@ class ICA:
 
         self.x_dim = x_dims
         # Initialize unmixing matrices for each state using Xavier/Glorot initialization
-        limit = np.sqrt(6 / (self.x_dim + self.m))
-        self.W = tf.Variable(
-            tf.random.uniform(shape=(self.k, self.x_dim, self.m),
+        limit = tf.math.sqrt(6 / (self.x_dim + self.m))
+        self.W = [tf.Variable(
+            tf.random.uniform(shape=(self.x_dim, self.m),
                               minval=-limit, maxval=limit),
             dtype=tf.float32,
-            name='unmixing_matrices'
-        )
+            name=f'unmixing_matrices_{i}'
+        ) for i in range(self.k)]
 
     def get_sources(self, x: tf.Tensor, state: int) -> tf.Tensor:
         """
@@ -216,7 +214,7 @@ class ICA:
         sources = self.get_sources(x, state)
 
         # Compute log determinant term
-        log_det = tf.math.log(tf.abs(tf.linalg.svd(self.W[state], compute_uv=False)))
+        log_det = tf.reduce_sum(tf.math.log(tf.abs(tf.linalg.svd(self.W[state], compute_uv=False))))
 
         # Compute source log probabilities
         if self.use_gar:

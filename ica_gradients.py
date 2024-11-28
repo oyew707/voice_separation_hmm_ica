@@ -11,7 +11,6 @@ __updated__ = "11/27/24"
 
 # Imports
 import tensorflow as tf
-from scipy.special import digamma
 from typing import Tuple, Optional
 from ICA import ICA
 
@@ -97,7 +96,8 @@ class ICAGradients:
 
                 # Compute gradient term
                 grad_term = R_j * beta_j * sign_term * power_term * y_j * gamma_k
-                W_grad[i, j] = W_pinv_T[i, j] - (1 / gamma_sum) * tf.reduce_sum(grad_term)
+                upd = W_pinv_T[i, j] - (1 / gamma_sum) * tf.reduce_sum(grad_term)
+                W_grad = tf.tensor_scatter_nd_update(W_grad, [[i, j]], [upd])
 
         # Beta gradient (optimal value)
         beta_grad = tf.zeros_like(self.ica.ge[state].beta)
@@ -105,7 +105,7 @@ class ICAGradients:
             R_i = self.ica.ge[state].R[i]
             abs_src_R = tf.pow(tf.abs(sources[:, i]), R_i)
             weighted_sum = tf.reduce_sum(gamma_k * abs_src_R)
-            beta_grad = gamma_sum / (R_i * weighted_sum)
+            beta_grad = tf.tensor_scatter_nd_update(beta_grad, [[i]], [gamma_sum / (R_i * weighted_sum)])
 
         # R gradient
         R_grad = tf.zeros_like(self.ica.ge[state].R)
@@ -114,7 +114,7 @@ class ICAGradients:
             beta_i = self.ica.ge[state].beta[i]
 
             # Digamma term = φ(1/R_i )=(Γ^′ (1/R_i ))/Γ(1/Ri )
-            digamma_term = digamma(1 / R_i)
+            digamma_term = tf.math.digamma(1 / R_i)
 
             # Log sum term
             abs_src = tf.abs(sources[:, i])
@@ -122,8 +122,9 @@ class ICAGradients:
             power_term = tf.pow(abs_src, R_i)
             sum_term = tf.reduce_sum(gamma_k * power_term * log_abs)
 
-            R_grad[i] = (1 / R_i) + (1 / (R_i ** 2)) * (tf.math.log(beta_i) + digamma_term) - \
-                        (beta_i / gamma_sum) * sum_term
+            upd = (1 / R_i) + (1 / (R_i ** 2)) * (tf.math.log(beta_i) + digamma_term) - \
+                  (beta_i / gamma_sum) * sum_term
+            R_grad = tf.tensor_scatter_nd_update(R_grad, [[i]], [upd])
 
         # GAR coefficients gradient if using GAR
         if self.ica.use_gar:
@@ -158,13 +159,14 @@ class ICAGradients:
 
             for d in range(self.ica.gar.p):
                 # Get delayed source values
-                delayed_source = sources[self.ica.gar.p - d - 1:-d - 1, i]
+                delayed_source = sources[:, i]  # sources[self.ica.gar.p - d - 1:-d - 1, i]
 
                 # Error term computation
                 error_term = R_i * tf.sign(errors[:, i]) * tf.pow(tf.abs(errors[:, i]), R_i - 1)
 
                 # Weighted sum
-                C_grad[i, d] = (1 / gamma_sum) * tf.reduce_sum(gamma_k * delayed_source * error_term)
+                upd = (1 / gamma_sum) * tf.reduce_sum(gamma_k * delayed_source * error_term)
+                C_grad = tf.tensor_scatter_nd_update(C_grad, [[i, d]], [upd])
 
         return C_grad
 

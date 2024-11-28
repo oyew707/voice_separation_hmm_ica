@@ -39,11 +39,11 @@ class GeneralizedAutoRegressive:
 
         # Initialize AR coefficients using Xavier/Glorot initialization
         limit = np.sqrt(6 / (m + p))
-        self.C = tf.Variable(
-            tf.random.uniform(shape=(k, m, p), minval=-limit, maxval=limit),
+        self.C = [tf.Variable(
+            tf.random.uniform(shape=( m, p), minval=-limit, maxval=limit),
             dtype=tf.float32,
-            name='ar_coefficients'
-        )
+            name=f'ar_coefficients_{i}'
+        ) for i in range(k)]
 
     @tf.function
     def predict(self, A: tf.Tensor, state: int) -> tf.Tensor:
@@ -93,5 +93,5 @@ class GeneralizedAutoRegressive:
         -------------------------------------------------------
         """
         predictions = self.predict(A, state)
-        actual_values = A[self.p:, :]
-        return actual_values - predictions
+        # actual_values = A[self.p:, :]
+        return A - predictions
