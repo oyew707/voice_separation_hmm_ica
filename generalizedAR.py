@@ -62,7 +62,7 @@ class GeneralizedAutoRegressive:
         """
         assert 0 <= state < self.k, "Invalid state index"
         # Create frames for each source
-        windows = tf.signal.frame(A, self.p, 1)  # Shape: [time_steps-p+1, p, k]
+        windows = tf.signal.frame(A, self.p, 1, pad_end=True, axis=0)  # Shape: [time_steps-p+1, p, k]
 
         # Transpose to get shape [time_steps-p+1, k, p] to align with coefficients
         windows = tf.transpose(windows, [0, 2, 1])

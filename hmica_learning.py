@@ -34,11 +34,14 @@ class HMICALearner:
         use_gar - Whether to use Generalized Autoregressive modeling (bool)
         gar_order - Order of GAR model if used (int > 0)
         update_interval - Number of ICA iterations before updating GAR (int > 0)
+        learning_rates - Dictionary of learning rates for model parameters (Optional[dict])
+        use_analytical - Whether to use analytical gradients for GAR (bool)
     -------------------------------------------------------
     """
 
     def __init__(self, k: int, m: int, x_dims: int, use_gar: bool = False,
-                 gar_order: int = 1, update_interval: int = 10, learning_rates: Optional[dict] = None):
+                 gar_order: int = 1, update_interval: int = 10, learning_rates: Optional[dict] = None,
+                 use_analytical: bool = True):
         # Initialize models
         self.k = k
         self.m = m
@@ -53,7 +56,7 @@ class HMICALearner:
             'beta': 0.01,  # Scale parameter
             'C': 0.01  # GAR coefficients
         }
-        self.learning_rates = learning_rates or default_rates
+        self.learning_rates = learning_rates | default_rates
 
         # Initialize HMM with uniform initial probabilities and transitions
         pi = tf.ones(k) / k
@@ -64,7 +67,7 @@ class HMICALearner:
         self.ica = ICA(k, m, x_dims, use_gar, gar_order)
 
         # Initialize gradient computer
-        self.grad_computer = ICAGradients(self.ica)
+        self.grad_computer = ICAGradients(self.ica, use_analytical)
 
     @staticmethod
     def compute_convergence(new_ll: float, old_ll: float, init_ll: float,
