@@ -105,7 +105,6 @@ class HMICALearner:
         -------------------------------------------------------
         """
         history = {'hmm_ll': [], 'ica_ll': []}
-
         init_hmm_ll, new_hmm_ll = None, None
 
         # Main EM loop
@@ -116,12 +115,11 @@ class HMICALearner:
             beta_hat = self.hmm.calc_beta_hat(x, obs_prob, c_t)
             g = self.hmm.p_zt_xT(x, alpha_hat, beta_hat, c_t)
             responsibilities = g / tf.reduce_sum(g, axis=1, keepdims=True)
+
             # Initial likelihood computation
             if init_hmm_ll is None:
                 init_hmm_ll = self._compute_total_likelihood(x, responsibilities, alpha_hat, beta_hat, c_t)
                 old_hmm_ll = init_hmm_ll
-            else:
-                old_hmm_ll = new_hmm_ll
 
             # M-step for each state
             for k in range(self.k):
@@ -133,11 +131,7 @@ class HMICALearner:
                 ica_iter = 0
 
                 # ICA update loop
-                while True and ica_iter < max_iter:
-                    # Get sources and errors
-                    sources = self.ica.get_sources(x, k)
-                    if self.use_gar:
-                        errors = self.ica.gar.compute_prediction_error(sources, k)
+                while ica_iter < max_iter:
 
                     # Compute and apply gradients
                     W_grad, R_grad, beta_grad, C_grad = self.grad_computer.compute_gradients(
@@ -148,10 +142,9 @@ class HMICALearner:
 
                     # Check ICA convergence
                     new_ica_ll = self._compute_ica_likelihood(x, k, gamma_k)
-                    # if self.compute_convergence(new_ica_ll, old_ica_ll,
-                    #                             init_ica_ll, ica_tol):
-                    #     print('Converged ICA')
-                    #     break
+                    if self.compute_convergence(new_ica_ll, old_ica_ll, init_ica_ll, ica_tol):
+                        print('Converged ICA')
+                        break
 
                     old_ica_ll = new_ica_ll
                     ica_iter += 1
@@ -163,11 +156,11 @@ class HMICALearner:
 
             # Check HMM convergence
             new_hmm_ll = self._compute_total_likelihood(x, responsibilities, alpha_hat, beta_hat, c_t)
-            # if self.compute_convergence(new_hmm_ll, old_hmm_ll,
-            #                             init_hmm_ll, hmm_tol):
-            #     print(f'Converged HMM')
-            #     break
+            if self.compute_convergence(new_hmm_ll, old_hmm_ll, init_hmm_ll, hmm_tol):
+                print(f'Converged HMM in {iteration+1} iterations')
+                break
 
+            old_hmm_ll = new_hmm_ll
             history['hmm_ll'].append(new_hmm_ll)
 
         return history
