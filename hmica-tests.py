@@ -16,6 +16,7 @@ from typing import Tuple, List
 import unittest
 from hmica_learning import HMICALearner
 from scipy import signal
+from evaluation import signal_to_noise_ratio, signal_to_distortion_ratio
 
 
 class TestDataGenerator:
@@ -150,7 +151,9 @@ class TestHMICA(unittest.TestCase):
             m=self.n_sources,
             x_dims=self.x_dims,
             use_gar=True,
-            gar_order=2
+            gar_order=4,
+            use_analytical=False,
+            learning_rates={'W': 1e-4, 'R': 1e-4, 'beta': 1e-4, 'C': 1e-4}
         )
 
     def test_initialization(self):
@@ -167,6 +170,8 @@ class TestHMICA(unittest.TestCase):
         self.assertIn('hmm_ll', history)
         self.assertIn('ica_ll', history)
 
+        print(history['hmm_ll'])
+        print(history['ica_ll'])
         # Check if log likelihood improves
         self.assertGreater(history['hmm_ll'][-1], history['hmm_ll'][0])
 
@@ -206,9 +211,10 @@ class TestHMICA(unittest.TestCase):
 
         # Get state responsibilities
         obs_prob = lambda state, x: self.model.ica.compute_likelihood( x, state)
+        obs_prob_matrix = self.model.hmm.calc_obs_prob(self.mixed_signals, obs_prob)
         alpha_hat, c_t = self.model.hmm.calc_alpha_hat(
             self.mixed_signals,
-            obs_prob
+            obs_prob_matrix
         )
 
         # Get most likely states
@@ -222,7 +228,56 @@ class TestHMICA(unittest.TestCase):
 
         # Should be better than random guessing
         self.assertGreater(accuracy, 0.5)
+    def test_separation_metrics(self):
+        """Test source separation quality using SNR and SDR metrics"""
+        # Arrange
+        true_sources = TestDataGenerator.generate_multisin_sources(
+            self.n_samples,
+            frequencies=[10, 20],
+            noise_type='gaussian',
+            snr=20.0  # High SNR for clean sources
+        )
 
+        # Mix sources
+        mixing_matrix = tf.constant([
+            [0.8, 0.2],
+            [0.3, 0.7]
+        ], dtype=tf.float32)
+        mixed_signals = TestDataGenerator.mix_sources(true_sources, mixing_matrix)
+
+        # Get sources before training
+        sources_pre = self.model.ica.get_sources(mixed_signals, state=0)
+
+        # Get initial metrics
+        initial_snr = signal_to_noise_ratio(true_sources, sources_pre)
+        initial_sdr = signal_to_distortion_ratio(true_sources, sources_pre)
+
+        # Act
+        self.model.train(mixed_signals, max_iter=20)
+
+        # Get separated sources after training
+        separated_sources = self.model.ica.get_sources(mixed_signals, state=0)
+
+        # Assert
+        final_snr = signal_to_noise_ratio(true_sources, separated_sources)
+        final_sdr = signal_to_distortion_ratio(true_sources, separated_sources)
+
+        # Assert improvements
+        self.assertGreater(
+            tf.reduce_mean(final_snr),
+            tf.reduce_mean(initial_snr),
+            "SNR should improve after training"
+        )
+
+        self.assertGreater(
+            tf.reduce_mean(final_sdr),
+            tf.reduce_mean(initial_sdr),
+            "SDR should improve after training"
+        )
+
+        # Print metrics for inspection
+        print(f"Initial SNR: {initial_snr.numpy()}, Final SNR: {final_snr.numpy()}")
+        print(f"Initial SDR: {initial_sdr.numpy()}, Final SDR: {final_sdr.numpy()}")
 
 if __name__ == '__main__':
     unittest.main()

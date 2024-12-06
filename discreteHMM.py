@@ -15,6 +15,7 @@ from typing import Tuple
 
 
 # Constants
+LOG_EPS = 1e-10
 
 class DiscreteHMM:
     """
@@ -38,66 +39,80 @@ class DiscreteHMM:
         # self.ica_model = ICA(k = self.dim_z, m = 2)
         # self.observation_probability = lambda state, x: self.ica_model.compute_likelihood(x, state)
 
-    def calc_alpha_hat(self, observations: tf.Tensor, observation_probability: callable) -> Tuple[tf.Tensor, tf.Tensor]:
-        """Given the observations, calculate the normalized forward pass.
+    @tf.function
+    def calc_obs_prob(self, observations: tf.Tensor, observation_probability: callable) -> tf.Tensor:
+        """Given the observations, compute all observation probability (used in calc_alpha_hat and calc_beta_hat).
 
         Args:
             observations: Observations for each time step.
             observation_probability: Function that returns the p(x_t|z_t)
+        Returns:
+            observation probability
+        """
+        obs_probs = tf.stack([observation_probability(k, observations) for k in range(self.dim_z)])
+        obs_probs = tf.transpose(obs_probs)
+        return obs_probs
+
+    @tf.function
+    def calc_alpha_hat(self, observations: tf.Tensor, obs_probs: tf.Tensor) -> Tuple[tf.Tensor, tf.Tensor]:
+        """Given the observations, calculate the normalized forward pass.
+
+        Args:
+            observations: Observations for each time step.
+            obs_probs: observation probabilities i.e. p(x_t|z_t)
         Returns:
             Normalized forward pass for each time step and latent state and
             normalization constants.
         """
         # Initialize a placeholder.
-        alpha_hat = tf.zeros([observations.shape[0] + 1, self.dim_z])
-        c_t = tf.zeros((observations.shape[0] + 1))
+        T = observations.shape[0]
+        alpha_hat = tf.TensorArray(tf.float32, size=T + 1, clear_after_read=False)
+        c_t = tf.TensorArray(tf.float32, size=T + 1, clear_after_read=False)
 
         # t=0 value. Consider c_0 = 1 for simplicity.
-        alpha_hat = tf.tensor_scatter_nd_update(alpha_hat, [[0]], [self.pi])
-        c_t = tf.tensor_scatter_nd_update(c_t, [[0]], [1])
+        alpha_hat = alpha_hat.write(0, self.pi)
+        c_t = c_t.write(0, tf.constant(1.0, dtype=tf.float32))
 
         # Recurse forward.
-        for t in range(1, alpha_hat.shape[0]):
-            for i in range(self.dim_z):
-                for j in range(self.dim_z):
-                    p_x_given_z = observation_probability(i, observations)
-                    updt = p_x_given_z[t - 1] * alpha_hat[t - 1, j] * self.transition_matrix[j, i]
-                    alpha_hat = tf.tensor_scatter_nd_add(alpha_hat, [[t, i]], [updt])
-            # Don't forget to normalize alpha_hat!
-            c_t = tf.tensor_scatter_nd_update(c_t, [[t]], [tf.math.reduce_sum(alpha_hat[t, :])])
-            alpha_hat = tf.tensor_scatter_nd_update(alpha_hat, [[t]], [alpha_hat[t] / c_t[t]])
+        for t in range(1, observations.shape[0] + 1):
+            alpha_t1 = alpha_hat.read(t - 1)[:, tf.newaxis]
+            new_alpha = tf.reduce_sum(
+                alpha_t1 * self.transition_matrix, axis=0
+            ) * obs_probs[t - 1]
+            new_c = tf.reduce_sum(new_alpha) + LOG_EPS
+            new_alpha /= new_c
+            c_t = c_t.write(t, new_c)
+            alpha_hat = alpha_hat.write(t, new_alpha)
 
-        return alpha_hat, c_t
+        return alpha_hat.stack(), c_t.stack()
 
-    def calc_beta_hat(self, observations: tf.Tensor, observation_probability: callable) -> tf.Tensor:
+    @tf.function
+    def calc_beta_hat(self, observations: tf.Tensor, obs_probs: tf.Tensor, c_t: tf.Tensor) -> tf.Tensor:
         """Given the observations, calculate the normalized backward pass.
 
         Args:
             observations: Observations for each time step.
-            observation_probability: Function that returns the p(x_t|z_t)
+            obs_probs: observation probabilities i.e. p(x_t|z_t)
+            c_t: Normalization constants for forward pass.
         Returns:
             Normalized backward pass for each time step.
         """
         # Initialize a placeholder.
-        beta_hat = tf.zeros([observations.shape[0] + 1, self.dim_z])
-
-        # Get the c_t values
-        _, c_t = self.calc_alpha_hat(observations, observation_probability)
+        beta_hat = tf.TensorArray(tf.float32, size=observations.shape[0] + 1, clear_after_read=False)
 
         # t=0 value.
-        beta_hat = tf.tensor_scatter_nd_update(beta_hat, [[beta_hat.shape[0] -1]], [tf.ones(self.dim_z)])
+        beta_hat = beta_hat.write(observations.shape[0], tf.ones(self.dim_z))
 
         # Recurse backward.
-        for t in range(beta_hat.shape[0] - 2, -1, -1):
-            for i in range(self.dim_z):
-                for j in range(self.dim_z):
-                    p_x_given_Z = observation_probability(j, observations)
-                    updt = p_x_given_Z[t] * beta_hat[t + 1, j] * self.transition_matrix[i, j]
-                    beta_hat = tf.tensor_scatter_nd_add(beta_hat, [[t, i]], [updt])
-            # Don't forget to normalize beta_hat!
-            beta_hat = tf.tensor_scatter_nd_update(beta_hat, [[t]], [beta_hat[t] / c_t[t + 1]])
+        for t in range(observations.shape[0] - 1, -1, -1):
+            curr_beta = tf.reduce_sum(
+                self.transition_matrix * obs_probs[t] *
+                beta_hat.read(t + 1)[tf.newaxis, :], axis=1
+            )
+            curr_beta = curr_beta / c_t[t + 1]
+            beta_hat = beta_hat.write(t, curr_beta)
 
-        return beta_hat
+        return beta_hat.stack()
 
     def p_zt_xt(self, observations: tf.Tensor, alpha_hat: tf.Tensor,
                 beta_hat: tf.Tensor, c_t: tf.Tensor):
@@ -117,6 +132,7 @@ class DiscreteHMM:
         """
         return alpha_hat
 
+    @tf.function
     def p_zt_xT(self, observations: tf.Tensor, alpha_hat: tf.Tensor,
                 beta_hat: tf.Tensor, c_t: tf.Tensor):
         """Calculate p(z_t|x_{1:T}) for all t.
@@ -133,9 +149,9 @@ class DiscreteHMM:
         Notes:
             You may not need all of the inputs.
         """
-
         return alpha_hat * beta_hat
 
+    @tf.function
     def p_zt_zt1_xt(self, observations: tf.Tensor, alpha_hat: tf.Tensor, beta_hat: tf.Tensor, c_t: tf.Tensor,
                     observation_probability: callable) -> tf.Tensor:
         """
@@ -150,15 +166,28 @@ class DiscreteHMM:
         Returns:
             Value of p(z_t, z_{t-1}|x_{1:T}) for each time step and latent state index.
         """
-        p_zt_zt1_xt = tf.zeros((observations.shape[0], self.dim_z, self.dim_z))
+        obs_probs = self.calc_obs_prob(observations, observation_probability)
 
-        for t in range(1, observations.shape[0]):
-            for i in range(self.dim_z):
-                for j in range(self.dim_z):
-                    p_x_given_z = observation_probability(j, observations)
-                    updt = alpha_hat[t - 1, i] * self.transition_matrix[i, j] * p_x_given_z[t] * beta_hat[
-                        t, j] / c_t[t]
-                    p_zt_zt1_xt = tf.tensor_scatter_nd_update(p_zt_zt1_xt, [[t, i, j]], [updt])
+        # Initialize result tensor
+        T = observations.shape[0]
+        p_zt_zt1_xt = tf.zeros((T, self.dim_z, self.dim_z))
+
+        # Expand dimensions for broadcasting
+        alpha_expanded = alpha_hat[:-1, :, tf.newaxis]  # [T, dim_z, 1]
+        beta_expanded = beta_hat[1:, tf.newaxis, :]  # [T, 1, dim_z]
+        obs_expanded = obs_probs[:, tf.newaxis, :]  # [T, 1, dim_z]
+        c_expanded = c_t[1:, tf.newaxis, tf.newaxis]  # [T, 1, 1]
+        trans_expanded = tf.expand_dims(self.transition_matrix, axis=0)  # [1, dim_z, dim_z]
+
+        # Compute joint probability in one vectorized operation
+        joint_prob = alpha_expanded * trans_expanded * obs_expanded * beta_expanded / c_expanded
+
+        # Update result tensor
+        p_zt_zt1_xt = tf.tensor_scatter_nd_update(
+            p_zt_zt1_xt,
+            tf.reshape(tf.range(0, T), [-1, 1]),
+            joint_prob
+        )
 
         return p_zt_zt1_xt
 

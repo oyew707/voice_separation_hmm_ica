@@ -51,10 +51,10 @@ class HMICALearner:
 
         # Default learning rates
         default_rates = {
-            'W': 0.01,  # Unmixing matrix
-            'R': 0.01,  # Shape parameter
-            'beta': 0.01,  # Scale parameter
-            'C': 0.01  # GAR coefficients
+            'W': 1e-4,  # Unmixing matrix
+            'R': 1e-4,  # Shape parameter
+            'beta': 1e-4,  # Scale parameter
+            'C': 1e-4  # GAR coefficients
         }
         self.learning_rates = learning_rates | default_rates
 
@@ -111,9 +111,9 @@ class HMICALearner:
         # Main EM loop
         for iteration in range(max_iter):
             # E-step: Forward-backward algorithm
-            obs_prob = lambda state, x: self.ica.compute_likelihood(x, state)
+            obs_prob = self.hmm.calc_obs_prob(x, lambda state, x: self.ica.compute_likelihood(x, state))
             alpha_hat, c_t = self.hmm.calc_alpha_hat(x, obs_prob)
-            beta_hat = self.hmm.calc_beta_hat(x, obs_prob)
+            beta_hat = self.hmm.calc_beta_hat(x, obs_prob, c_t)
             g = self.hmm.p_zt_xT(x, alpha_hat, beta_hat, c_t)
             responsibilities = g / tf.reduce_sum(g, axis=1, keepdims=True)
             # Initial likelihood computation

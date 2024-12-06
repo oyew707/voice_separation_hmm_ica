@@ -15,6 +15,7 @@ import tensorflow as tf
 from generalizedAR import GeneralizedAutoRegressive
 
 # Constants
+LOG_EPSILON = 1e-8
 
 
 class GeneralizedExponential:
@@ -52,7 +53,7 @@ class GeneralizedExponential:
         -------------------------------------------------------
         """
         Z = (self.R * tf.pow(self.beta, 1 / self.R)) / (2 * tf.exp(tf.math.lgamma(1 / self.R)))
-        exp_term = tf.exp(-self.beta * tf.pow(tf.abs(a), self.R))
+        exp_term = tf.exp(-self.beta * tf.pow(tf.abs(a)+LOG_EPSILON, self.R))
         return Z * exp_term
 
     def log_pdf(self, a: tf.Tensor) -> tf.Tensor:
@@ -66,7 +67,10 @@ class GeneralizedExponential:
             log_pdf_values - Log probability density values (tf.Tensor of same shape as input)
         -------------------------------------------------------
         """
-        return tf.math.log(self.pdf(a))
+        log_Z = (tf.math.log(self.R) + (1 / self.R) * tf.math.log(self.beta) -
+                 tf.math.log(2.0) - tf.math.lgamma(1 / self.R))
+        exo_term_log = -self.beta * tf.pow(tf.abs(a)+LOG_EPSILON, self.R)
+        return log_Z + exo_term_log
 
 
 class ICA:
@@ -123,6 +127,7 @@ class ICA:
             name=f'unmixing_matrices_{i}'
         ) for i in range(self.k)]
 
+    @tf.function
     def get_sources(self, x: tf.Tensor, state: int) -> tf.Tensor:
         """
         -------------------------------------------------------
@@ -141,6 +146,29 @@ class ICA:
         if self.W is None:
             self.initialize_unmixing_matrices(x.shape[-1])
         return tf.matmul(x, self.W[state], transpose_b=True)
+
+    @tf.function
+    def _compute_log_det(self, state: int) -> tf.Tensor:
+        """
+        -------------------------------------------------------
+        Computes the log pseudo determinant of the unmixing matrix for the given state
+        Would re-use computation with computation graphs
+        -------------------------------------------------------
+        Parameters:
+            state - Current state index (int, 0 <= state < k)
+        Returns:
+            log_det - Log determinant of the unmixing matrix (tf.Tensor of shape [])
+        -------------------------------------------------------
+        """
+
+        # matrix is well-conditioned when computing pseudo determinant; prevents Eigen::BDCSVD failed with error code
+        W_scaled = self.W[state] / (tf.norm(self.W[state], axis=1, keepdims=True) + LOG_EPSILON)
+
+        # Add small regularization to support pseudo-determinant stability
+        reg_matrix = W_scaled + tf.eye(W_scaled.shape[0]) * 1e-6
+
+        s = tf.linalg.svd(reg_matrix, compute_uv=False)
+        return tf.reduce_sum(tf.math.log(tf.abs(s)))
 
     @tf.function
     def compute_likelihood(self, x: tf.Tensor, state: int) -> tf.Tensor:
@@ -167,10 +195,7 @@ class ICA:
         sources = self.get_sources(x, state)
 
         # Compute pseudo-determinant term for non-square matrix
-        # Using SVD to compute product of singular values
-        s = tf.linalg.svd(self.W[state], compute_uv=False)
-        # Use log determinant to avoid numerical issues
-        log_det = tf.reduce_sum(tf.math.log(tf.abs(s)))
+        log_det = self._compute_log_det(state)
 
         # Compute source probabilities
         if self.use_gar:
@@ -190,6 +215,7 @@ class ICA:
 
         return likelihood
 
+    @tf.function
     def compute_log_likelihood(self, x: tf.Tensor, state: int) -> tf.Tensor:
         """
         -------------------------------------------------------
@@ -214,7 +240,7 @@ class ICA:
         sources = self.get_sources(x, state)
 
         # Compute log determinant term
-        log_det = tf.reduce_sum(tf.math.log(tf.abs(tf.linalg.svd(self.W[state], compute_uv=False))))
+        log_det = self._compute_log_det(state)
 
         # Compute source log probabilities
         if self.use_gar:
