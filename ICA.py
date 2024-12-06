@@ -53,7 +53,7 @@ class GeneralizedExponential:
         -------------------------------------------------------
         """
         Z = (self.R * tf.pow(self.beta, 1 / self.R)) / (2 * tf.exp(tf.math.lgamma(1 / self.R)))
-        exp_term = tf.exp(-self.beta * tf.pow(tf.abs(a)+LOG_EPSILON, self.R))
+        exp_term = tf.exp(-self.beta * tf.pow(tf.abs(a) + LOG_EPSILON, self.R))
         return Z * exp_term
 
     def log_pdf(self, a: tf.Tensor) -> tf.Tensor:
@@ -69,7 +69,7 @@ class GeneralizedExponential:
         """
         log_Z = (tf.math.log(self.R) + (1 / self.R) * tf.math.log(self.beta) -
                  tf.math.log(2.0) - tf.math.lgamma(1 / self.R))
-        exo_term_log = -self.beta * tf.pow(tf.abs(a)+LOG_EPSILON, self.R)
+        exo_term_log = -self.beta * tf.pow(tf.abs(a) + LOG_EPSILON, self.R)
         return log_Z + exo_term_log
 
 
@@ -145,7 +145,7 @@ class ICA:
         # Initialize unmixing matrices if needed
         if self.W is None:
             self.initialize_unmixing_matrices(x.shape[-1])
-        return tf.matmul(x, self.W[state], transpose_b=True)
+        return tf.matmul(x, self.W[state], transpose_b=False)
 
     @tf.function
     def _compute_log_det(self, state: int) -> tf.Tensor:
@@ -165,9 +165,16 @@ class ICA:
         W_scaled = self.W[state] / (tf.norm(self.W[state], axis=1, keepdims=True) + LOG_EPSILON)
 
         # Add small regularization to support pseudo-determinant stability
-        reg_matrix = W_scaled + tf.eye(W_scaled.shape[0]) * 1e-6
+        reg_matrix = W_scaled + tf.eye(W_scaled.shape[0], W_scaled.shape[1]) * 1e-6
 
-        s = tf.linalg.svd(reg_matrix, compute_uv=False)
+        try:
+            s = tf.linalg.svd(reg_matrix, compute_uv=False)
+        except:
+            # Compute QR decomposition first
+            q, r = tf.linalg.qr(reg_matrix)
+            # Get singular values from the R matrix (more stable)
+            s = tf.abs(tf.linalg.diag_part(r))
+
         return tf.reduce_sum(tf.math.log(tf.abs(s)))
 
     @tf.function
