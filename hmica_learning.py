@@ -89,7 +89,7 @@ class HMICALearner:
             return False
         return (new_ll - init_ll) / (old_ll - init_ll) < 1 + delta
 
-    def train(self, x: tf.Tensor, max_iter: int = 100,
+    def train(self, x: tf.Tensor, hmm_max_iter: int = 100, ica_max_iter: int = 10,
               hmm_tol: float = 1e-4, ica_tol: float = 1e-2) -> dict:
         """
         -------------------------------------------------------
@@ -108,7 +108,7 @@ class HMICALearner:
         init_hmm_ll, new_hmm_ll = None, None
 
         # Main EM loop
-        for iteration in range(max_iter):
+        for iteration in range(hmm_max_iter):
             # E-step: Forward-backward algorithm
             obs_prob = self.hmm.calc_obs_prob(x, lambda state, x: self.ica.compute_likelihood(x, state))
             alpha_hat, c_t = self.hmm.calc_alpha_hat(x, obs_prob)
@@ -131,7 +131,7 @@ class HMICALearner:
                 ica_iter = 0
 
                 # ICA update loop
-                while ica_iter < max_iter:
+                while ica_iter < ica_max_iter:
 
                     # Compute and apply gradients
                     W_grad, R_grad, beta_grad, C_grad = self.grad_computer.compute_gradients(

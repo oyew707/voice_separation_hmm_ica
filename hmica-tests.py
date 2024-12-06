@@ -164,7 +164,7 @@ class TestHMICA(unittest.TestCase):
 
     def test_training(self):
         """Test model training"""
-        history = self.model.train(self.mixed_signals, max_iter=10)
+        history = self.model.train(self.mixed_signals, hmm_max_iter=10, ica_max_iter=2)
 
         # Check if training history contains expected keys
         self.assertIn('hmm_ll', history)
@@ -184,7 +184,7 @@ class TestHMICA(unittest.TestCase):
         )
 
         # Train model
-        self.model.train(self.mixed_signals, max_iter=10)
+        self.model.train(self.mixed_signals, hmm_max_iter=10, ica_max_iter=2)
 
         # Get sources for first state
         sources = self.model.ica.get_sources(
@@ -253,7 +253,7 @@ class TestHMICA(unittest.TestCase):
         initial_sdr = signal_to_distortion_ratio(true_sources, sources_pre)
 
         # Act
-        self.model.train(mixed_signals, max_iter=20)
+        self.model.train(mixed_signals, hmm_max_iter=10, ica_max_iter=2)
 
         # Get separated sources after training
         separated_sources = self.model.ica.get_sources(mixed_signals, state=0)
