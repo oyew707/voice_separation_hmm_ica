@@ -8,20 +8,36 @@ Email:   eo2233@nyu.edu
 __updated__ = "11/28/24"
 -------------------------------------------------------
 """
-from collections import defaultdict
 
 # Imports
 import tensorflow as tf
-from typing import Optional
+from typing import Optional, Dict, List
 from ICA import ICA
 from discreteHMM import DiscreteHMM
 from ica_gradients import ICAGradients
 from tqdm import tqdm
+from functools import wraps, partial
+import time
+from collections import defaultdict
+import multiprocessing as mp
+
 
 # Constants
 tf.config.run_functions_eagerly(True)
 RANDOM_SEED=4
 tf.random.set_seed(RANDOM_SEED)
+WARMUP_STEPS = 3
+
+def timeit(func):
+    @wraps(func)
+    def timeit_wrapper(*args, **kwargs):
+        start_time = time.perf_counter()
+        result = func(*args, **kwargs)
+        end_time = time.perf_counter()
+        total_time = end_time - start_time
+        print(f'Function {func.__name__} Took {total_time:.4f} seconds')
+        return result
+    return timeit_wrapper
 
 class HMICALearner:
     """
@@ -43,7 +59,7 @@ class HMICALearner:
 
     def __init__(self, k: int, m: int, x_dims: int, use_gar: bool = False,
                  gar_order: int = 1, update_interval: int = 10, learning_rates: Optional[dict] = None,
-                 use_analytical: bool = True):
+                 use_analytical: bool = True, A: Optional[tf.Tensor] = None, pi: Optional[tf.Tensor] = None):
         # Initialize models
         self.k = k
         self.m = m
@@ -61,8 +77,8 @@ class HMICALearner:
         self.learning_rates = learning_rates | default_rates
 
         # Initialize HMM with uniform initial probabilities and transitions
-        pi = tf.ones(k) / k
-        A = tf.ones((k, k)) / k
+        A = tf.ones((k, k)) / k if A is None else A
+        pi = tf.ones(k) / k if pi is None else pi
         self.hmm = DiscreteHMM(pi, A)
 
         # Initialize ICA model
@@ -118,9 +134,6 @@ class HMICALearner:
             g = self.hmm.p_zt_xT(x, alpha_hat, beta_hat, c_t)
             responsibilities = g / tf.reduce_sum(g, axis=1, keepdims=True)
 
-            # Update HMM parameters
-            self._update_hmm_parameters(x, responsibilities, alpha_hat, beta_hat, c_t)
-
             # Initial likelihood computation
             if init_hmm_ll is None:
                 init_hmm_ll = self._compute_total_likelihood(x, responsibilities, alpha_hat, beta_hat, c_t)
@@ -133,7 +146,6 @@ class HMICALearner:
                 # Initialize ICA iteration tracking
                 init_ica_ll = self._compute_ica_likelihood(x, k, gamma_k)
                 old_ica_ll = init_ica_ll
-                ica_iter = 0
 
                 # ICA update loop
                 for ica_iter in range(ica_max_iter):
@@ -155,9 +167,12 @@ class HMICALearner:
 
                     history['ica_ll'][k].append(new_ica_ll.numpy())
 
+            # Update HMM parameters
+            self._update_hmm_parameters(x, responsibilities, alpha_hat, beta_hat, c_t)
+
             # Check HMM convergence
             new_hmm_ll = self._compute_total_likelihood(x, responsibilities, alpha_hat, beta_hat, c_t)
-            if iteration > 5 and self.compute_convergence(new_hmm_ll, old_hmm_ll, init_hmm_ll, hmm_tol):
+            if iteration > WARMUP_STEPS and self.compute_convergence(new_hmm_ll, old_hmm_ll, init_hmm_ll, hmm_tol):
                 print(f'Converged HMM in {iteration+1} iterations')
                 break
 
@@ -219,6 +234,7 @@ class HMICALearner:
             C_optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rates['C'])
             C_optimizer.apply_gradients([(-1*C_grad, self.ica.gar.C[state])])
 
+    @timeit
     def _update_hmm_parameters(self, x: tf.Tensor, responsibilities: tf.Tensor, alpha_hat: tf.Tensor,
                                beta_hat: tf.Tensor, c_t: tf.Tensor):
         """
@@ -246,6 +262,7 @@ class HMICALearner:
         row_sums = tf.where(tf.equal(row_sums, 0), tf.ones_like(row_sums), row_sums)
         self.hmm.transition_matrix = A / row_sums
 
+    @timeit
     def _compute_total_likelihood(self, x: tf.Tensor, responsibilities: tf.Tensor, alpha_hat: tf.Tensor,
                                   beta_hat: tf.Tensor, c_t: tf.Tensor) -> float:
         """
@@ -310,3 +327,142 @@ class HMICALearner:
         joint_prob = self.hmm.p_zt_zt1_xt(x, alpha_hat, beta_hat, c_t, obs_prob)
 
         return joint_prob
+
+
+class ParallelHMICALearner(HMICALearner):
+    """
+    -------------------------------------------------------
+    Parallel M-step implementation for Hidden Markov Independent
+    Component Analysis using multiprocessing
+    -------------------------------------------------------
+    Parameters:
+        n_workers - Number of parallel workers (int > 0)
+    """
+    def __init__(self, *args, n_workers: int = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.n_workers = n_workers or mp.cpu_count()
+        self.ica_max_iter = None
+        self.ica_tol = None
+
+    def _parallel_state_optimization(self, x: tf.Tensor, responsibilities: tf.Tensor,
+                                     state: int) -> Dict[str, tf.Tensor]:
+        """
+        -------------------------------------------------------
+        Optimizes parameters for a single state in a separate process
+        -------------------------------------------------------
+        Parameters:
+            x - Input mixed signals (tf.Tensor of shape [time_steps, x_dim])
+            responsibilities - State responsibilities (tf.Tensor of shape [time_steps+1, k])
+            state - Current state index to optimize (int, 0 <= state < k)
+        Returns:
+            results - Dictionary containing optimized parameters:
+                     'W': Unmixing matrix for the state
+                     'R': Shape parameters for GE distribution
+                     'beta': Scale parameters for GE distribution
+                     'C': GAR coefficients (if using GAR)
+                     'final_ll': Final log-likelihood value
+        -------------------------------------------------------
+        """
+        assert 0 <= state < self.k, "Invalid state index"
+        assert self.ica_max_iter is not None, "ICA max iterations not set"
+        assert self.ica_tol is not None, "ICA convergence tolerance not set"
+
+        gamma_k = responsibilities[1:, state]
+
+        # Initialize ICA iteration tracking
+        init_ica_ll = self._compute_ica_likelihood(x, state, gamma_k)
+        new_ica_ll = old_ica_ll = init_ica_ll
+
+        # ICA update loop
+        for ica_iter in range(self.ica_max_iter):
+            # Compute and apply gradients
+            W_grad, R_grad, beta_grad, C_grad = self.grad_computer.compute_gradients(
+                x, gamma_k, state)
+
+            # Update parameters using gradient steps
+            self._update_parameters(state, W_grad, R_grad, beta_grad, C_grad, ica_iter)
+
+            # Check ICA convergence
+            new_ica_ll = self._compute_ica_likelihood(x, state, gamma_k)
+            if self.compute_convergence(new_ica_ll, old_ica_ll, init_ica_ll, self.ica_tol):
+                print(f'Converged ICA {state} in {ica_iter} iterations')
+                break
+
+            old_ica_ll = new_ica_ll
+
+        return {
+            'W': self.ica.W[state].numpy(),
+            'R': self.ica.ge[state].R.numpy(),
+            'beta': self.ica.ge[state].beta.numpy(),
+            'C': self.ica.gar.C[state].numpy() if self.ica.use_gar else None,
+            'final_ll': float(new_ica_ll)
+        }
+
+    def train(self, x: tf.Tensor, hmm_max_iter: int = 100, ica_max_iter: int = 10,
+              hmm_tol: float = 1e-4, ica_tol: float = 1e-2) -> dict:
+        """
+        -------------------------------------------------------
+        Trains the HMICA model using parallel M-step optimization
+        -------------------------------------------------------
+        Parameters:
+            x - Input mixed signals (tf.Tensor of shape [time_steps, x_dim])
+            hmm_max_iter - Maximum number of HMM EM iterations (int > 0)
+            ica_max_iter - Maximum number of ICA iterations per state (int > 0)
+            hmm_tol - Convergence tolerance for HMM updates (float > 0)
+            ica_tol - Convergence tolerance for ICA updates (float > 0)
+        Returns:
+            history - Dictionary containing:
+                     'hmm_ll': List of HMM log-likelihood values
+                     'ica_ll': List of ICA log-likelihood values
+        -------------------------------------------------------
+        """
+        self.ica_max_iter = ica_max_iter
+        self.ica_tol = ica_tol
+        history = {'hmm_ll': [], 'ica_ll': defaultdict(list)}
+        init_hmm_ll, new_hmm_ll = None, None
+
+        # Create process pool
+        pool = mp.Pool(processes=self.n_workers)
+
+        # Main EM loop
+        for iteration in tqdm(range(hmm_max_iter)):
+            # E-step: Forward-backward algorithm
+            obs_prob = self.hmm.calc_obs_prob(x, lambda state, x: self.ica.compute_likelihood(x, state))
+            alpha_hat, c_t = self.hmm.calc_alpha_hat(x, obs_prob)
+            beta_hat = self.hmm.calc_beta_hat(x, obs_prob, c_t)
+            g = self.hmm.p_zt_xT(x, alpha_hat, beta_hat, c_t)
+            responsibilities = g / tf.reduce_sum(g, axis=1, keepdims=True)
+
+            # Initial likelihood computation
+            if init_hmm_ll is None:
+                init_hmm_ll = self._compute_total_likelihood(x, responsibilities, alpha_hat, beta_hat, c_t)
+                old_hmm_ll = init_hmm_ll
+
+            # M-step: Parallel optimization for each state
+            optimize_state = partial(self._parallel_state_optimization, x, responsibilities)
+            state_results = pool.map(optimize_state, range(self.k))
+
+            # Update model parameters from parallel results
+            for state, result in enumerate(state_results):
+                self.ica.W[state].assign(result['W'])
+                self.ica.ge[state].R.assign(result['R'])
+                self.ica.ge[state].beta.assign(result['beta'])
+                if self.ica.use_gar and result['C'] is not None:
+                    self.ica.gar.C[state].assign(result['C'])
+                history['ica_ll'][state].append(result['final_ll'])
+
+            # Update HMM parameters
+            self._update_hmm_parameters(x, responsibilities, alpha_hat, beta_hat, c_t)
+
+            # Check HMM convergence
+            new_hmm_ll = self._compute_total_likelihood(x, responsibilities, alpha_hat, beta_hat, c_t)
+            if iteration > WARMUP_STEPS and self.compute_convergence(new_hmm_ll, old_hmm_ll, init_hmm_ll, hmm_tol):
+                print(f'Converged HMM in {iteration + 1} iterations')
+                break
+
+            old_hmm_ll = new_hmm_ll
+            history['hmm_ll'].append(float(new_hmm_ll))
+
+        pool.close()
+        pool.join()
+        return history
