@@ -16,6 +16,8 @@ from typing import Tuple
 
 # Constants
 LOG_EPS = 1e-10
+RANDOM_SEED=4
+tf.random.set_seed(RANDOM_SEED)
 
 class DiscreteHMM:
     """
@@ -217,3 +219,66 @@ class DiscreteHMM:
                                tf.math.log(observation_probability(sequence_indices[t], observations[t]))
 
         return log_probability
+
+    def viterbi_for_inference(self, observations: tf.Tensor, observation_probability: callable) -> Tuple[tf.Tensor, tf.Tensor]:
+        """Run the Viterbi algorithm on our dHMM observations.
+
+        Args:
+            observations: Observations for each time step.
+            observation_probability: Function that returns the p(x_t|z_t)
+        Returns:
+            One-hot encoding of MAP sequence.
+        """
+        # Initialize variables.
+        T = observations.shape[0]
+
+        # Pre-compute all observation probabilities at once [T, dim_z]
+        obs_probs = self.calc_obs_prob(observations, observation_probability)
+        log_obs_probs = tf.math.log(obs_probs + LOG_EPS)
+
+        # Initialize weight matrix w[t,k] and backpointer matrix m[t,k]
+        # w has T+1 rows because we need initial weights w₀
+        w_array = tf.TensorArray(tf.float32, size=T + 1, clear_after_read=False)
+        m_array = tf.TensorArray(tf.int32, size=T, clear_after_read=False)
+
+        # Initialize w₀ with log of initial probabilities
+        w_array = w_array.write(0, tf.math.log(self.pi + 1e-10))
+
+        # Pre-compute log transition probabilities
+        log_trans = tf.math.log(self.transition_matrix + LOG_EPS)
+
+        # Forward pass to fill w and m matrices
+        for t in tf.range(T):
+            # Calculate all possible paths to each state
+            # [dim_z, 1] + [dim_z, dim_z] -> broadcasting to [dim_z, dim_z]
+            all_paths = tf.expand_dims(w_array.read(t), 1) + log_trans
+
+            # Find best previous state and weight for all current states at once
+            max_weights = tf.reduce_max(all_paths, axis=0)  # [dim_z]
+            best_prev_states = tf.cast(tf.argmax(all_paths, axis=0), tf.int32)  # [dim_z]
+
+            # Update matrices for all states at once
+            w_array = w_array.write(t + 1, log_obs_probs[t] + max_weights)
+            m_array = m_array.write(t, best_prev_states)
+
+        w_matrix, m_matrix = w_array.stack(), m_array.stack()
+
+        # Backtrack to find MAP sequence
+        map_path = tf.TensorArray(tf.int32, size=T + 1, clear_after_read=False)
+
+        # Get z_T
+        last_state = tf.cast(tf.argmax(w_matrix[T]), tf.int32)
+        map_path = map_path.write(T, last_state)
+
+        # Backtrack
+        current_state = last_state
+        for t in tf.range(T - 1, -1, -1):
+            current_state = m_matrix[t, current_state]
+            map_path = map_path.write(t, current_state)
+
+        # Stack final path and convert to one-hot
+        map_path = map_path.stack()
+        map_sequence = tf.one_hot(map_path, self.dim_z)
+
+        return map_sequence, w_matrix
+

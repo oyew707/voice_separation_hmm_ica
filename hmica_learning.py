@@ -8,7 +8,7 @@ Email:   eo2233@nyu.edu
 __updated__ = "11/28/24"
 -------------------------------------------------------
 """
-
+from collections import defaultdict
 
 # Imports
 import tensorflow as tf
@@ -16,10 +16,12 @@ from typing import Optional
 from ICA import ICA
 from discreteHMM import DiscreteHMM
 from ica_gradients import ICAGradients
-
+from tqdm import tqdm
 
 # Constants
 tf.config.run_functions_eagerly(True)
+RANDOM_SEED=4
+tf.random.set_seed(RANDOM_SEED)
 
 class HMICALearner:
     """
@@ -104,17 +106,20 @@ class HMICALearner:
             history - Dictionary containing training history
         -------------------------------------------------------
         """
-        history = {'hmm_ll': [], 'ica_ll': []}
+        history = {'hmm_ll': [], 'ica_ll': defaultdict(list)}
         init_hmm_ll, new_hmm_ll = None, None
 
         # Main EM loop
-        for iteration in range(hmm_max_iter):
+        for iteration in tqdm(range(hmm_max_iter)):
             # E-step: Forward-backward algorithm
             obs_prob = self.hmm.calc_obs_prob(x, lambda state, x: self.ica.compute_likelihood(x, state))
             alpha_hat, c_t = self.hmm.calc_alpha_hat(x, obs_prob)
             beta_hat = self.hmm.calc_beta_hat(x, obs_prob, c_t)
             g = self.hmm.p_zt_xT(x, alpha_hat, beta_hat, c_t)
             responsibilities = g / tf.reduce_sum(g, axis=1, keepdims=True)
+
+            # Update HMM parameters
+            self._update_hmm_parameters(x, responsibilities, alpha_hat, beta_hat, c_t)
 
             # Initial likelihood computation
             if init_hmm_ll is None:
@@ -131,7 +136,7 @@ class HMICALearner:
                 ica_iter = 0
 
                 # ICA update loop
-                while ica_iter < ica_max_iter:
+                for ica_iter in range(ica_max_iter):
 
                     # Compute and apply gradients
                     W_grad, R_grad, beta_grad, C_grad = self.grad_computer.compute_gradients(
@@ -143,25 +148,21 @@ class HMICALearner:
                     # Check ICA convergence
                     new_ica_ll = self._compute_ica_likelihood(x, k, gamma_k)
                     if self.compute_convergence(new_ica_ll, old_ica_ll, init_ica_ll, ica_tol):
-                        print('Converged ICA')
+                        print(f'Converged ICA {k} {ica_iter} in {iteration+1} iterations')
                         break
 
                     old_ica_ll = new_ica_ll
-                    ica_iter += 1
 
-                history['ica_ll'].append(new_ica_ll)
-
-            # Update HMM parameters
-            self._update_hmm_parameters(x, responsibilities, alpha_hat, beta_hat, c_t)
+                    history['ica_ll'][k].append(new_ica_ll.numpy())
 
             # Check HMM convergence
             new_hmm_ll = self._compute_total_likelihood(x, responsibilities, alpha_hat, beta_hat, c_t)
-            if self.compute_convergence(new_hmm_ll, old_hmm_ll, init_hmm_ll, hmm_tol):
+            if iteration > 5 and self.compute_convergence(new_hmm_ll, old_hmm_ll, init_hmm_ll, hmm_tol):
                 print(f'Converged HMM in {iteration+1} iterations')
                 break
 
             old_hmm_ll = new_hmm_ll
-            history['hmm_ll'].append(new_hmm_ll)
+            history['hmm_ll'].append(new_hmm_ll.numpy())
 
         return history
 
