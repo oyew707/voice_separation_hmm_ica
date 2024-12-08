@@ -53,6 +53,13 @@ class DiscreteHMM:
         """
         obs_probs = tf.stack([observation_probability(k, observations) for k in range(self.dim_z)])
         obs_probs = tf.transpose(obs_probs)
+
+        # Add small epsilon to prevent zero probabilities
+        obs_probs = obs_probs + 1e-12
+
+        # This keeps the relative likelihoods between states while making numbers more manageable
+        normalizer = tf.reduce_sum(obs_probs, axis=1, keepdims=True)
+        obs_probs = obs_probs / normalizer
         return obs_probs
 
     @tf.function
@@ -193,32 +200,35 @@ class DiscreteHMM:
 
         return p_zt_zt1_xt
 
-    def log_p_sequence_xt(self, observations: tf.Tensor, latent_sequence: tf.Tensor,
-                          observation_probability: callable) -> float:
-        """Log likelihood of the sequence given the data p(z_{1:T}|x_{1:T}).
-
+    @tf.function
+    def infer_states_forward_backward(self, observations: tf.Tensor, observation_probability: callable) -> float:
+        """the sequence of states given the data p(z_{1:T}|x_{1:T}).
+            use the forward-backward algorithm (p(z_t|x_{1:T})) for state inference
         Args:
             observations: Observations for each time step.
-            latent_sequence: Proposed latent sequence. Can be a probability
-                distribution at each time step, in which case argmax will be taken
-                to determine proposal.
             observation_probability: Function that returns the p(x_t|z_t)
 
         Returns:
-            Log of the probability of the sequence given the data.
+            One-hot encoding of state sequence.
         """
-        log_probability = 0
-        sequence_indices = tf.math.argmax(latent_sequence, axis=-1)
+        # Pre-compute all observation probabilities at once [T, dim_z]
+        obs_probs = self.calc_obs_prob(observations, observation_probability)
 
-        # Log probability for first time step.
-        log_probability += tf.math.log(self.pi[sequence_indices[0]])
+        # Calculate alpha_hat and c_t
+        alpha_hat, c_t = self.calc_alpha_hat(observations, obs_probs)
 
-        # Log probability for remaining time steps.
-        for t in range(len(observations)):
-            log_probability += tf.math.log(self.transition_matrix[sequence_indices[t], sequence_indices[t + 1]]) + \
-                               tf.math.log(observation_probability(sequence_indices[t], observations[t]))
+        # calculate beta_hat
+        beta_hat = self.calc_beta_hat(observations, obs_probs, c_t)
 
-        return log_probability
+        # calculate p(z_t|x_{1:T})
+        posterior = self.p_zt_xT(observations, alpha_hat, beta_hat, c_t)
+        # Normalize posterior probabilities
+        posterior = posterior / tf.reduce_sum(posterior, axis=1, keepdims=True)
+        sequence_indices = tf.math.argmax(posterior, axis=-1)
+
+        map_sequence = tf.one_hot(sequence_indices, self.dim_z)
+
+        return map_sequence
 
     def viterbi_for_inference(self, observations: tf.Tensor, observation_probability: callable) -> Tuple[tf.Tensor, tf.Tensor]:
         """Run the Viterbi algorithm on our dHMM observations.
