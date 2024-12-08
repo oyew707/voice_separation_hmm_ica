@@ -24,9 +24,9 @@ import multiprocessing as mp
 
 # Constants
 tf.config.run_functions_eagerly(True)
-RANDOM_SEED=4
+RANDOM_SEED=1234
 tf.random.set_seed(RANDOM_SEED)
-WARMUP_STEPS = 3
+WARMUP_STEPS = 5
 
 def timeit(func):
     @wraps(func)
@@ -77,7 +77,13 @@ class HMICALearner:
         self.learning_rates = learning_rates | default_rates
 
         # Initialize HMM with uniform initial probabilities and transitions
-        A = tf.ones((k, k)) / k if A is None else A
+        diag_prob = 0.35
+        off_diag_prob = (1.0 - diag_prob) / (k - 1)
+
+        transition_matrix = tf.ones((k, k)) * off_diag_prob
+        transition_matrix += tf.eye(k) * (diag_prob - off_diag_prob)
+
+        A = transition_matrix if A is None else A
         pi = tf.ones(k) / k if pi is None else pi
         self.hmm = DiscreteHMM(pi, A)
 
@@ -146,6 +152,8 @@ class HMICALearner:
                 # Initialize ICA iteration tracking
                 init_ica_ll = self._compute_ica_likelihood(x, k, gamma_k)
                 old_ica_ll = init_ica_ll
+                patience = 0
+                best_ica_ll = init_ica_ll
 
                 # ICA update loop
                 for ica_iter in range(ica_max_iter):
@@ -159,13 +167,17 @@ class HMICALearner:
 
                     # Check ICA convergence
                     new_ica_ll = self._compute_ica_likelihood(x, k, gamma_k)
-                    if self.compute_convergence(new_ica_ll, old_ica_ll, init_ica_ll, ica_tol):
+                    if ica_iter >= WARMUP_STEPS and self.compute_convergence(new_ica_ll, old_ica_ll, init_ica_ll, ica_tol):
                         print(f'Converged ICA {k} {ica_iter} in {iteration+1} iterations')
+                        break
+                    early_stop, patience, best_ica_ll = self._early_stopping(best_ica_ll, new_ica_ll, patience)
+                    if early_stop:
+                        print(f'Early stop ICA {k} {ica_iter} in {iteration + 1} iterations')
                         break
 
                     old_ica_ll = new_ica_ll
 
-                    history['ica_ll'][k].append(new_ica_ll.numpy())
+                    history['ica_ll'][k].append(float(new_ica_ll))
 
             # Update HMM parameters
             self._update_hmm_parameters(x, responsibilities, alpha_hat, beta_hat, c_t)
@@ -219,6 +231,9 @@ class HMICALearner:
         W_optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rates['W'])
         W_optimizer.apply_gradients([(-1*W_grad, self.ica.W[state])])
 
+        if (ica_iter + 1) % self.update_interval != 0:
+            return
+
         # Update source distribution parameters
         R_optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rates['R'])
         R_optimizer.apply_gradients([(-1*R_grad, self.ica.ge[state].R)])
@@ -230,7 +245,7 @@ class HMICALearner:
             beta_optimizer.apply_gradients([(-1*beta_grad, self.ica.ge[state].beta)])
 
         # Update GAR coefficients if using GAR
-        if self.use_gar and C_grad is not None and (ica_iter + 1) % self.update_interval == 0:
+        if self.use_gar and C_grad is not None:
             C_optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rates['C'])
             C_optimizer.apply_gradients([(-1*C_grad, self.ica.gar.C[state])])
 
@@ -257,10 +272,16 @@ class HMICALearner:
         A = tf.reduce_sum(self._compute_joint_state_prob(x, alpha_hat, beta_hat, c_t), axis=0)
 
         # Normalize
-        row_sums = tf.reduce_sum(A, axis=1)
+        row_sums = tf.reduce_sum(A, axis=1, keepdims=True)
         # row_sums[row_sums == 0] = 1  # Avoid division by zero
         row_sums = tf.where(tf.equal(row_sums, 0), tf.ones_like(row_sums), row_sums)
         self.hmm.transition_matrix = A / row_sums
+
+        # Add small epsilon to avoid zeros
+        epsilon = 1e-6
+        self.hmm.transition_matrix += epsilon
+        # Renormalize after adding epsilon
+        self.hmm.transition_matrix /= tf.reduce_sum(self.hmm.transition_matrix, axis=1, keepdims=True)
 
     @timeit
     def _compute_total_likelihood(self, x: tf.Tensor, responsibilities: tf.Tensor, alpha_hat: tf.Tensor,
@@ -328,6 +349,31 @@ class HMICALearner:
 
         return joint_prob
 
+    def _early_stopping(self, best_loss, current_loss, current_iteration, patience):
+        """
+        -------------------------------------------------------
+        Early stopping criterion based on loss values
+        -------------------------------------------------------
+        Parameters:
+            best_loss - Best loss value so far (float)
+            current_loss - Current loss value (float)
+            current_iteration - Current iteration number (int)
+            patience - Current patience value (int)
+        Returns:
+            stop - Whether to stop training (bool)
+            patience - Updated patience value (int)
+            best_loss - Updated bestloss value (float)
+        -------------------------------------------------------
+        """
+        if current_iteration < WARMUP_STEPS:
+            return False, patience+1, best_loss
+        if current_loss > best_loss:
+            best_loss = current_loss
+            patience = 0
+        else:
+            patience += 1
+        return patience >= WARMUP_STEPS, patience, best_loss
+
 
 class ParallelHMICALearner(HMICALearner):
     """
@@ -372,6 +418,8 @@ class ParallelHMICALearner(HMICALearner):
         # Initialize ICA iteration tracking
         init_ica_ll = self._compute_ica_likelihood(x, state, gamma_k)
         new_ica_ll = old_ica_ll = init_ica_ll
+        patience = 0
+        best_ica_ll = init_ica_ll
 
         # ICA update loop
         for ica_iter in range(self.ica_max_iter):
@@ -384,8 +432,11 @@ class ParallelHMICALearner(HMICALearner):
 
             # Check ICA convergence
             new_ica_ll = self._compute_ica_likelihood(x, state, gamma_k)
-            if self.compute_convergence(new_ica_ll, old_ica_ll, init_ica_ll, self.ica_tol):
+            if ica_iter >= WARMUP_STEPS and self.compute_convergence(new_ica_ll, old_ica_ll, init_ica_ll, self.ica_tol):
                 print(f'Converged ICA {state} in {ica_iter} iterations')
+                break
+            early_stop, patience, best_ica_ll = self._early_stopping(best_ica_ll, new_ica_ll, patience, self.ica_tol)
+            if ica_iter >= WARMUP_STEPS and early_stop:
                 break
 
             old_ica_ll = new_ica_ll

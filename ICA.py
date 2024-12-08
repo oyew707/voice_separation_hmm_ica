@@ -16,7 +16,7 @@ from generalizedAR import GeneralizedAutoRegressive
 
 # Constants
 LOG_EPSILON = 1e-8
-RANDOM_SEED=1234
+RANDOM_SEED=2
 tf.random.set_seed(RANDOM_SEED)
 
 class GeneralizedExponential:
@@ -34,7 +34,7 @@ class GeneralizedExponential:
     def __init__(self, m: int):
         self.m = m
         self.R = tf.Variable(
-            tf.ones(m, dtype=tf.float32) * 2.0,  # Initialize as Gaussian; Suggested in paper (pg 16)
+            tf.ones(m, dtype=tf.float32) * 0.5,  # Initialize as super Gaussian; Suggested in paper (pg 16)
             name='ge_shape'
         )
         # beta_init = tf.exp(tf.math.lgamma(1/self.R)) / (2 * tf.exp(tf.math.lgamma(3/self.R)))
@@ -117,33 +117,33 @@ class ICA:
             x_dims - Number of observed dimensions (int > 0)
         -------------------------------------------------------
         """
-        # if self.W is not None and self.x_dim == x_dims:
-        #     return  # Already initialized with correct dimensions
-        #
-        # self.x_dim = x_dims
-        #
-        # # Generate all random matrices at once [k, x_dim, m]
-        # W_init = tf.random.normal(shape=(self.k, self.x_dim, self.m))
-        #
-        # # QR decomposition on batched matrices
-        # q, r = tf.linalg.qr(W_init)
-        #
-        # # Scale by Xavier/Glorot factor
-        # limit = tf.math.sqrt(6 / (self.x_dim + self.m))
-        # W_init = q * limit
-        #
-        # # Row normalize across last dimension
-        # W_init = W_init / tf.norm(W_init, axis=2, keepdims=True)
-        #
-        # # Create list of Variables
-        # self.W = [tf.Variable(W_init[i], dtype=tf.float32,
-        #                       name=f'unmixing_matrices_{i}') for i in range(self.k)]
-        self.W = [
-            tf.Variable(
-                tf.random.uniform(shape=(self.x_dim, self.m), minval=-0.05, maxval=0.05, seed=i)+tf.eye(self.x_dim, self.m),
-                dtype=tf.float32,
-                name=f'unmixing_matrices_{i}') for i in range(self.k)
-        ]  # Suggested in paper (pg 16)
+        if self.W is not None and self.x_dim == x_dims:
+            return  # Already initialized with correct dimensions
+
+        self.x_dim = x_dims
+
+        # Generate all random matrices at once [k, x_dim, m]
+        W_init = tf.random.normal(shape=(self.k, self.x_dim, self.m))
+
+        # QR decomposition on batched matrices
+        q, r = tf.linalg.qr(W_init)
+
+        # Scale by Xavier/Glorot factor
+        limit = tf.math.sqrt(6 / (self.x_dim + self.m))
+        W_init = q * limit
+
+        # Row normalize across last dimension
+        W_init = W_init / tf.norm(W_init, axis=2, keepdims=True)
+
+        # Create list of Variables
+        self.W = [tf.Variable(W_init[i], dtype=tf.float32,
+                              name=f'unmixing_matrices_{i}') for i in range(self.k)]
+        # self.W = [
+        #     tf.Variable(
+        #         tf.random.uniform(shape=(self.x_dim, self.m), minval=-0.5, maxval=0.5, seed=i), #+tf.eye(self.x_dim, self.m),
+        #         dtype=tf.float32,
+        #         name=f'unmixing_matrices_{i}') for i in range(self.k)
+        # ]  # Suggested in paper (pg 16)
 
 
     @tf.function

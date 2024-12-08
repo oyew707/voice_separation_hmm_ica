@@ -16,7 +16,7 @@ from typing import Tuple
 
 # Constants
 LOG_EPS = 1e-10
-RANDOM_SEED=4
+RANDOM_SEED=2
 tf.random.set_seed(RANDOM_SEED)
 
 class DiscreteHMM:
@@ -242,37 +242,37 @@ class DiscreteHMM:
         m_array = tf.TensorArray(tf.int32, size=T, clear_after_read=False)
 
         # Initialize w₀ with log of initial probabilities
-        w_array = w_array.write(0, tf.math.log(self.pi + 1e-10))
+        w_array = w_array.write(0, tf.math.log(self.pi + LOG_EPS) + log_obs_probs[0])
 
         # Pre-compute log transition probabilities
         log_trans = tf.math.log(self.transition_matrix + LOG_EPS)
 
         # Forward pass to fill w and m matrices
-        for t in tf.range(T):
+        for t in tf.range(1, T):
             # Calculate all possible paths to each state
             # [dim_z, 1] + [dim_z, dim_z] -> broadcasting to [dim_z, dim_z]
-            all_paths = tf.expand_dims(w_array.read(t), 1) + log_trans
+            all_paths = tf.expand_dims(w_array.read(t-1), 1) + log_trans
 
             # Find best previous state and weight for all current states at once
-            max_weights = tf.reduce_max(all_paths, axis=0)  # [dim_z]
+            max_weights = tf.reduce_max(all_paths, axis=0) + log_obs_probs[t]   # [dim_z]
             best_prev_states = tf.cast(tf.argmax(all_paths, axis=0), tf.int32)  # [dim_z]
 
             # Update matrices for all states at once
-            w_array = w_array.write(t + 1, log_obs_probs[t] + max_weights)
-            m_array = m_array.write(t, best_prev_states)
+            w_array = w_array.write(t, max_weights)
+            m_array = m_array.write(t-1, best_prev_states)
 
         w_matrix, m_matrix = w_array.stack(), m_array.stack()
 
         # Backtrack to find MAP sequence
-        map_path = tf.TensorArray(tf.int32, size=T + 1, clear_after_read=False)
+        map_path = tf.TensorArray(tf.int32, size=T, clear_after_read=False)
 
         # Get z_T
-        last_state = tf.cast(tf.argmax(w_matrix[T]), tf.int32)
-        map_path = map_path.write(T, last_state)
+        last_state = tf.cast(tf.argmax(w_matrix[T-1]), tf.int32)
+        map_path = map_path.write(T-1, last_state)
 
         # Backtrack
         current_state = last_state
-        for t in tf.range(T - 1, -1, -1):
+        for t in tf.range(T - 2, -1, -1):
             current_state = m_matrix[t, current_state]
             map_path = map_path.write(t, current_state)
 
