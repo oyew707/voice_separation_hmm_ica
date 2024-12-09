@@ -12,8 +12,9 @@ __updated__ = "11/28/24"
 # Imports
 import tensorflow as tf
 from typing import Optional, Dict, List
-from ICA import ICA
+from ICA import ICA, GeneralizedExponential
 from discreteHMM import DiscreteHMM
+from generalizedAR import GeneralizedAutoRegressive
 from ica_gradients import ICAGradients
 from tqdm import tqdm
 from functools import wraps, partial
@@ -21,12 +22,9 @@ import time
 from collections import defaultdict
 import multiprocessing as mp
 
-
 # Constants
 tf.config.run_functions_eagerly(True)
-RANDOM_SEED=1234
-tf.random.set_seed(RANDOM_SEED)
-WARMUP_STEPS = 5
+
 
 def timeit(func):
     @wraps(func)
@@ -37,7 +35,9 @@ def timeit(func):
         total_time = end_time - start_time
         print(f'Function {func.__name__} Took {total_time:.4f} seconds')
         return result
+
     return timeit_wrapper
+
 
 class HMICALearner:
     """
@@ -54,18 +54,25 @@ class HMICALearner:
         update_interval - Number of ICA iterations before updating GAR (int > 0)
         learning_rates - Dictionary of learning rates for model parameters (Optional[dict])
         use_analytical - Whether to use analytical gradients for GAR (bool)
+        A - Initial transition matrix for HMM (Optional[tf.Tensor])
+        pi - Initial state probabilities for HMM (Optional[tf.Tensor])
     -------------------------------------------------------
     """
 
     def __init__(self, k: int, m: int, x_dims: int, use_gar: bool = False,
                  gar_order: int = 1, update_interval: int = 10, learning_rates: Optional[dict] = None,
-                 use_analytical: bool = True, A: Optional[tf.Tensor] = None, pi: Optional[tf.Tensor] = None):
+                 use_analytical: bool = True, A: Optional[tf.Tensor] = None, pi: Optional[tf.Tensor] = None,
+                 random_seed: Optional[int] = None, **kwargs):
         # Initialize models
         self.k = k
         self.m = m
         self.x_dims = x_dims
         self.use_gar = use_gar
         self.update_interval = update_interval
+        self.gar_order = gar_order
+        self.random_seed = random_seed
+        self.patience = kwargs['patience']
+        self.warmup_steps = kwargs['warmup_period']
 
         # Default learning rates
         default_rates = {
@@ -74,7 +81,10 @@ class HMICALearner:
             'beta': 1e-4,  # Scale parameter
             'C': 1e-4  # GAR coefficients
         }
-        self.learning_rates = learning_rates | default_rates
+        self.learning_rates = learning_rates | default_rates if learning_rates is not None else default_rates
+
+        # set seed
+        tf.random.set_seed(random_seed)
 
         # Initialize HMM with uniform initial probabilities and transitions
         diag_prob = 0.35
@@ -91,7 +101,27 @@ class HMICALearner:
         self.ica = ICA(k, m, x_dims, use_gar, gar_order)
 
         # Initialize gradient computer
-        self.grad_computer = ICAGradients(self.ica, use_analytical)
+        self.grad_computer = ICAGradients(use_analytical)
+
+    def set_ica_parameters(self, W: Optional[tf.Tensor], R: Optional[tf.Tensor], beta: Optional[tf.Tensor],
+                           C: Optional[tf.Tensor]):
+        """
+        -------------------------------------------------------
+        Set initial parameters for ICA model
+        -------------------------------------------------------
+        Parameters:
+            W - Initial unmixing matrix (tf.Tensor of shape [m, m])
+            R - Initial shape parameter (tf.Tensor of shape [m])
+            beta - Initial scale parameter (tf.Tensor of shape [m])
+            C - Initial GAR coefficients (tf.Tensor of shape [m, p])
+        -------------------------------------------------------
+        """
+        # Initialize ICA model with W
+        self.ica = ICA(self.k, self.m, self.x_dims, self.use_gar, self.gar_order, W=W, random_seed=self.random_seed)
+        # Initialize GE distributions
+        self.ica.ge = [GeneralizedExponential(self.m, R=R[i] if R else None, beta=beta[i] if beta else None) for i in range(self.k)]
+        if self.use_gar:
+            self.ica.gar = GeneralizedAutoRegressive(self.k, self.m, self.gar_order, self.random_seed, C)
 
     @staticmethod
     def compute_convergence(new_ll: float, old_ll: float, init_ll: float,
@@ -160,17 +190,19 @@ class HMICALearner:
 
                     # Compute and apply gradients
                     W_grad, R_grad, beta_grad, C_grad = self.grad_computer.compute_gradients(
-                        x, gamma_k, k)
+                        x, gamma_k, k, self.ica)
 
                     # Update parameters using gradient steps
                     self._update_parameters(k, W_grad, R_grad, beta_grad, C_grad, ica_iter)
 
                     # Check ICA convergence
                     new_ica_ll = self._compute_ica_likelihood(x, k, gamma_k)
-                    if ica_iter >= WARMUP_STEPS and self.compute_convergence(new_ica_ll, old_ica_ll, init_ica_ll, ica_tol):
-                        print(f'Converged ICA {k} {ica_iter} in {iteration+1} iterations')
+                    if ica_iter >= self.warmup_steps and self.compute_convergence(new_ica_ll, old_ica_ll, init_ica_ll,
+                                                                                  ica_tol):
+                        print(f'Converged ICA {k} {ica_iter} in {iteration + 1} iterations')
                         break
-                    early_stop, patience, best_ica_ll = self._early_stopping(best_ica_ll, new_ica_ll, patience)
+                    early_stop, patience, best_ica_ll = self._early_stopping(best_ica_ll, new_ica_ll,
+                                                                             ica_iter, patience)
                     if early_stop:
                         print(f'Early stop ICA {k} {ica_iter} in {iteration + 1} iterations')
                         break
@@ -184,12 +216,12 @@ class HMICALearner:
 
             # Check HMM convergence
             new_hmm_ll = self._compute_total_likelihood(x, responsibilities, alpha_hat, beta_hat, c_t)
-            if iteration > WARMUP_STEPS and self.compute_convergence(new_hmm_ll, old_hmm_ll, init_hmm_ll, hmm_tol):
-                print(f'Converged HMM in {iteration+1} iterations')
+            if iteration > self.warmup_steps and self.compute_convergence(new_hmm_ll, old_hmm_ll, init_hmm_ll, hmm_tol):
+                print(f'Converged HMM in {iteration + 1} iterations')
                 break
 
             old_hmm_ll = new_hmm_ll
-            history['hmm_ll'].append(new_hmm_ll.numpy())
+            history['hmm_ll'].append(float(new_hmm_ll))
 
         return history
 
@@ -229,25 +261,25 @@ class HMICALearner:
         """
         # Update unmixing matrix
         W_optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rates['W'])
-        W_optimizer.apply_gradients([(-1*W_grad, self.ica.W[state])])
+        W_optimizer.apply_gradients([(-1 * W_grad, self.ica.W[state])])
 
         if (ica_iter + 1) % self.update_interval != 0:
             return
 
         # Update source distribution parameters
         R_optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rates['R'])
-        R_optimizer.apply_gradients([(-1*R_grad, self.ica.ge[state].R)])
+        R_optimizer.apply_gradients([(-1 * R_grad, self.ica.ge[state].R)])
 
         if self.grad_computer.use_analytical:
             self.ica.ge[state].beta = beta_grad
         else:
             beta_optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rates['beta'])
-            beta_optimizer.apply_gradients([(-1*beta_grad, self.ica.ge[state].beta)])
+            beta_optimizer.apply_gradients([(-1 * beta_grad, self.ica.ge[state].beta)])
 
         # Update GAR coefficients if using GAR
         if self.use_gar and C_grad is not None:
             C_optimizer = tf.keras.optimizers.Adam(learning_rate=self.learning_rates['C'])
-            C_optimizer.apply_gradients([(-1*C_grad, self.ica.gar.C[state])])
+            C_optimizer.apply_gradients([(-1 * C_grad, self.ica.gar.C[state])])
 
     @timeit
     def _update_hmm_parameters(self, x: tf.Tensor, responsibilities: tf.Tensor, alpha_hat: tf.Tensor,
@@ -365,14 +397,14 @@ class HMICALearner:
             best_loss - Updated bestloss value (float)
         -------------------------------------------------------
         """
-        if current_iteration < WARMUP_STEPS:
-            return False, patience+1, best_loss
+        if current_iteration < self.warmup_steps:
+            return False, patience + 1, best_loss
         if current_loss > best_loss:
             best_loss = current_loss
             patience = 0
         else:
             patience += 1
-        return patience >= WARMUP_STEPS, patience, best_loss
+        return patience >= self.patience, patience, best_loss
 
 
 class ParallelHMICALearner(HMICALearner):
@@ -384,6 +416,7 @@ class ParallelHMICALearner(HMICALearner):
     Parameters:
         n_workers - Number of parallel workers (int > 0)
     """
+
     def __init__(self, *args, n_workers: int = None, **kwargs):
         super().__init__(*args, **kwargs)
         self.n_workers = n_workers or mp.cpu_count()
@@ -425,18 +458,19 @@ class ParallelHMICALearner(HMICALearner):
         for ica_iter in range(self.ica_max_iter):
             # Compute and apply gradients
             W_grad, R_grad, beta_grad, C_grad = self.grad_computer.compute_gradients(
-                x, gamma_k, state)
+                x, gamma_k, state, self.ica)
 
             # Update parameters using gradient steps
             self._update_parameters(state, W_grad, R_grad, beta_grad, C_grad, ica_iter)
 
             # Check ICA convergence
             new_ica_ll = self._compute_ica_likelihood(x, state, gamma_k)
-            if ica_iter >= WARMUP_STEPS and self.compute_convergence(new_ica_ll, old_ica_ll, init_ica_ll, self.ica_tol):
+            if ica_iter >= self.warmup_steps and self.compute_convergence(new_ica_ll, old_ica_ll, init_ica_ll,
+                                                                          self.ica_tol):
                 print(f'Converged ICA {state} in {ica_iter} iterations')
                 break
             early_stop, patience, best_ica_ll = self._early_stopping(best_ica_ll, new_ica_ll, patience, self.ica_tol)
-            if ica_iter >= WARMUP_STEPS and early_stop:
+            if ica_iter >= self.warmup_steps and early_stop:
                 break
 
             old_ica_ll = new_ica_ll
@@ -507,7 +541,7 @@ class ParallelHMICALearner(HMICALearner):
 
             # Check HMM convergence
             new_hmm_ll = self._compute_total_likelihood(x, responsibilities, alpha_hat, beta_hat, c_t)
-            if iteration > WARMUP_STEPS and self.compute_convergence(new_hmm_ll, old_hmm_ll, init_hmm_ll, hmm_tol):
+            if iteration > self.warmup_steps and self.compute_convergence(new_hmm_ll, old_hmm_ll, init_hmm_ll, hmm_tol):
                 print(f'Converged HMM in {iteration + 1} iterations')
                 break
 

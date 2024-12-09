@@ -13,11 +13,11 @@ __updated__ = "11/27/24"
 import tensorflow as tf
 from typing import Tuple
 
-
 # Constants
 LOG_EPS = 1e-10
-RANDOM_SEED=2
+RANDOM_SEED = 2
 tf.random.set_seed(RANDOM_SEED)
+
 
 class DiscreteHMM:
     """
@@ -230,7 +230,8 @@ class DiscreteHMM:
 
         return map_sequence
 
-    def viterbi_for_inference(self, observations: tf.Tensor, observation_probability: callable) -> Tuple[tf.Tensor, tf.Tensor]:
+    def viterbi_for_inference(self, observations: tf.Tensor, observation_probability: callable) -> Tuple[
+        tf.Tensor, tf.Tensor]:
         """Run the Viterbi algorithm on our dHMM observations.
 
         Args:
@@ -261,15 +262,15 @@ class DiscreteHMM:
         for t in tf.range(1, T):
             # Calculate all possible paths to each state
             # [dim_z, 1] + [dim_z, dim_z] -> broadcasting to [dim_z, dim_z]
-            all_paths = tf.expand_dims(w_array.read(t-1), 1) + log_trans
+            all_paths = tf.expand_dims(w_array.read(t - 1), 1) + log_trans
 
             # Find best previous state and weight for all current states at once
-            max_weights = tf.reduce_max(all_paths, axis=0) + log_obs_probs[t]   # [dim_z]
+            max_weights = tf.reduce_max(all_paths, axis=0) + log_obs_probs[t]  # [dim_z]
             best_prev_states = tf.cast(tf.argmax(all_paths, axis=0), tf.int32)  # [dim_z]
 
             # Update matrices for all states at once
             w_array = w_array.write(t, max_weights)
-            m_array = m_array.write(t-1, best_prev_states)
+            m_array = m_array.write(t - 1, best_prev_states)
 
         w_matrix, m_matrix = w_array.stack(), m_array.stack()
 
@@ -277,8 +278,8 @@ class DiscreteHMM:
         map_path = tf.TensorArray(tf.int32, size=T, clear_after_read=False)
 
         # Get z_T
-        last_state = tf.cast(tf.argmax(w_matrix[T-1]), tf.int32)
-        map_path = map_path.write(T-1, last_state)
+        last_state = tf.cast(tf.argmax(w_matrix[T - 1]), tf.int32)
+        map_path = map_path.write(T - 1, last_state)
 
         # Backtrack
         current_state = last_state
@@ -291,4 +292,3 @@ class DiscreteHMM:
         map_sequence = tf.one_hot(map_path, self.dim_z)
 
         return map_sequence, w_matrix
-

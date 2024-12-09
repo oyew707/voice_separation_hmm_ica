@@ -12,6 +12,8 @@ __updated__ = "11/27/24"
 # Imports
 import tensorflow as tf
 import numpy as np
+from typing import List, Optional
+
 
 # Constants
 
@@ -25,13 +27,20 @@ class GeneralizedAutoRegressive:
         k - Number of states in the Hidden Markov Model (int > 0)
         m - Number of independent sources to model (int > 0)
         p - Order of the autoregressive model (int > 0)
+        random_seed - Seed for random initialization (int)
+        C - AR coefficients for each state (List of tf.Tensor of shape [m, p])
     -------------------------------------------------------
     """
 
-    def __init__(self, k: int, m: int, p: int):
+    def __init__(self, k: int, m: int, p: int, random_seed: Optional[int] = None, C: Optional[List[tf.Tensor]] = None):
         assert m > 0, "Number of sources must be a positive integer"
         assert p > 0, "Order of AR model must be a positive integer"
         assert k > 0, "Number of states must be a positive integer"
+        if random_seed is not None:
+            assert isinstance(random_seed, int), "Random seed must be an integer"
+        if C is not None:
+            assert len(C) == k, "AR coefficients must be a list of k state tf.Tensors"
+            assert all([c.shape == (m, p) for c in C]), "AR coefficients must have shape [m, p]"
 
         self.m = m  # Number of sources
         self.p = p  # Order of the AR model
@@ -39,8 +48,8 @@ class GeneralizedAutoRegressive:
 
         # Initialize AR coefficients using Xavier/Glorot initialization
         limit = np.sqrt(6 / (m + p))
-        self.C = [tf.Variable(
-            tf.random.uniform(shape=( m, p), minval=-limit, maxval=limit),
+        self.C = C or [tf.Variable(
+            tf.random.uniform(shape=(m, p), minval=-limit, maxval=limit, seed=random_seed),
             dtype=tf.float32,
             name=f'ar_coefficients_{i}'
         ) for i in range(k)]

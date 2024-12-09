@@ -8,37 +8,43 @@ Email:   eo2233@nyu.edu
 __updated__ = "11/27/24"
 -------------------------------------------------------
 """
-from typing import Optional
 
 # Imports
+import random
+from typing import Optional, List
 import tensorflow as tf
 from generalizedAR import GeneralizedAutoRegressive
 
 # Constants
 LOG_EPSILON = 1e-8
-RANDOM_SEED=2
-tf.random.set_seed(RANDOM_SEED)
+
 
 class GeneralizedExponential:
     """
     -------------------------------------------------------
     A class implementing the Generalized Exponential distribution
-    with shape parameter R and scale parameter β
+    with shape parameter R and scale parameter β and 0 mean
     G(a;R,β) = (Rβ^(1/R))/(2Γ(1/R)) * exp(-β|a|^R)
     -------------------------------------------------------
     Parameters:
         m - Number of independent components (int > 0)
+        R - Shape (kurtosis) parameter (tf.Tensor of shape [m])
+        beta - Scale (Variance) parameter (tf.Tensor of shape [m])
     -------------------------------------------------------
     """
 
-    def __init__(self, m: int):
+    def __init__(self, m: int, R: Optional[tf.Tensor] = None, beta: Optional[tf.Tensor] = None):
+        assert m > 0, "Number of components must be positive"
+        assert R is None or R.shape == (m,), f"Shape parameter must have shape [m]"
+        assert beta is None or beta.shape == (m,), f"Scale parameter must have shape [m]"
+
         self.m = m
-        self.R = tf.Variable(
+        self.R = R or tf.Variable(
             tf.ones(m, dtype=tf.float32) * 0.5,  # Initialize as super Gaussian; Suggested in paper (pg 16)
             name='ge_shape'
         )
         # beta_init = tf.exp(tf.math.lgamma(1/self.R)) / (2 * tf.exp(tf.math.lgamma(3/self.R)))
-        beta_init = tf.ones(m, dtype=tf.float32) # Suggested in paper (pg 16)
+        beta_init = beta or tf.ones(m, dtype=tf.float32)  # Suggested in paper (pg 16)
         self.beta = tf.Variable(
             beta_init,
             name='ge_scale'
@@ -55,6 +61,8 @@ class GeneralizedExponential:
             pdf_values - Probability density values (tf.Tensor of same shape as input)
         -------------------------------------------------------
         """
+        assert a.shape[-1] == self.m, f"Input shape must match number of components {self.m}"
+
         Z = (self.R * tf.pow(self.beta, 1 / self.R)) / (2 * tf.exp(tf.math.lgamma(1 / self.R)))
         exp_term = tf.exp(-self.beta * tf.pow(tf.abs(a) + LOG_EPSILON, self.R))
         return Z * exp_term
@@ -70,6 +78,8 @@ class GeneralizedExponential:
             log_pdf_values - Log probability density values (tf.Tensor of same shape as input)
         -------------------------------------------------------
         """
+        assert a.shape[-1] == self.m, f"Input shape must match number of components {self.m}"
+
         log_Z = (tf.math.log(self.R) + (1 / self.R) * tf.math.log(self.beta) -
                  tf.math.log(2.0) - tf.math.lgamma(1 / self.R))
         exo_term_log = -self.beta * tf.pow(tf.abs(a) + LOG_EPSILON, self.R)
@@ -88,21 +98,32 @@ class ICA:
         x_dims - Number of observed dimensions (int > 0), if None will be inferred from data
         use_gar - Whether to use Generalized Autoregressive modeling (bool)
         gar_order - Order of GAR model if used (int > 0, default=1)
+        W - Initial unmixing matrices (List of tf.Tensor of shape [x_dims, m])
+        random_seed - Seed for random initialization and reproducibility (int)
     -------------------------------------------------------
     """
 
-    def __init__(self, k: int, m: int, x_dims: Optional[int] = None, use_gar: bool = False, gar_order: int = 1):
+    def __init__(self, k: int, m: int, x_dims: Optional[int] = None, use_gar: bool = False, gar_order: int = 1,
+                 W: Optional[List[tf.Tensor]] = None, random_seed: Optional[int] = None):
 
         assert k > 0, "Number of states must be positive"
         assert m > 0, "Number of sources must be positive"
         if x_dims is not None:
             assert x_dims > 0, "Number of dimensions must be positive"
+        if random_seed is not None:
+            assert isinstance(random_seed, int), "Random seed must be an integer"
+        assert gar_order > 0, "GAR order must be positive"
+        if W is not None:
+            assert len(W) == k, f"We should have {k} unmixing matrices"
+            assert all([w.shape == (x_dims, m) for w in W]), f"Unmixing matrices must have shape [{x_dims}, {m}]"
 
         self.k = k  # Number of states
         self.m = m  # Number of sources/dimensions
         self.use_gar = use_gar
         self.x_dim = x_dims
-        self.W = None
+        self.W = W
+        self.random_seed = random_seed
+        tf.random.set_seed(random_seed)
 
         # Initialize a GeneralizedExponential object for each state
         self.ge = [GeneralizedExponential(m) for _ in range(k)]
@@ -123,7 +144,7 @@ class ICA:
         self.x_dim = x_dims
 
         # Generate all random matrices at once [k, x_dim, m]
-        W_init = tf.random.normal(shape=(self.k, self.x_dim, self.m))
+        W_init = tf.random.normal(shape=(self.k, self.x_dim, self.m), seed=self.random_seed)
 
         # QR decomposition on batched matrices
         q, r = tf.linalg.qr(W_init)
@@ -138,13 +159,14 @@ class ICA:
         # Create list of Variables
         self.W = [tf.Variable(W_init[i], dtype=tf.float32,
                               name=f'unmixing_matrices_{i}') for i in range(self.k)]
+
+        # random_seeds = random.sample(range(1, self.k * 10), self.k)
         # self.W = [
         #     tf.Variable(
-        #         tf.random.uniform(shape=(self.x_dim, self.m), minval=-0.5, maxval=0.5, seed=i), #+tf.eye(self.x_dim, self.m),
+        #         tf.random.uniform(shape=(self.x_dim, self.m), minval=-0.5, maxval=0.5, seed=random_seeds[i]), #+tf.eye(self.x_dim, self.m),
         #         dtype=tf.float32,
         #         name=f'unmixing_matrices_{i}') for i in range(self.k)
         # ]  # Suggested in paper (pg 16)
-
 
     @tf.function
     def get_sources(self, x: tf.Tensor, state: int) -> tf.Tensor:
@@ -165,6 +187,24 @@ class ICA:
         if self.W is None:
             self.initialize_unmixing_matrices(x.shape[-1])
         return tf.matmul(x, self.W[state], transpose_b=False)
+
+    @tf.function
+    def get_mixture(self, s: tf.Tensor, state: int) -> tf.Tensor:
+        """
+        -------------------------------------------------------
+        Mixes the signals using the inverse of the unmixing matrix for the given state
+        -------------------------------------------------------
+        Parameters:
+            x - Input mixed signals (tf.Tensor of shape [time_steps, x_dim])
+            state - Current state index (int, 0 <= state < k)
+        Returns:
+            sources - Unmixed source signals (tf.Tensor of shape [time_steps, m])
+        -------------------------------------------------------
+        """
+        assert 0 <= state < self.k, "Invalid state index"
+        assert self.W is not None, "Unmixing matrices must be initialized"
+        V = tf.linalg.pinv(self.W[state])
+        return tf.matmul(s, V, transpose_b=False)
 
     @tf.function
     def _compute_log_det(self, state: int) -> tf.Tensor:
