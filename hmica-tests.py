@@ -17,6 +17,9 @@ import unittest
 from hmica_learning import HMICALearner
 from scipy import signal
 from evaluation import signal_to_noise_ratio, signal_to_distortion_ratio
+from HMICA import HMICA
+from sklearn.utils.estimator_checks import check_estimator
+from sklearn.exceptions import NotFittedError
 
 
 class TestDataGenerator:
@@ -278,6 +281,207 @@ class TestHMICA(unittest.TestCase):
             tf.reduce_mean(initial_sdr),
             "SDR should improve after training"
         )
+
+
+class TestHMICASklearn(unittest.TestCase):
+    def setUp(self):
+        """Setup test data and model"""
+        # Set random seeds for reproducibility
+        tf.random.set_seed(42)
+        np.random.seed(42)
+
+        # Generate synthetic test data
+        self.n_samples = 200
+        self.n_features = 2
+        self.n_states = 2
+        self.n_sources = 2
+
+        # Create two different mixing matrices for different states
+        theta1 = np.pi / 4  # 45 degrees
+        theta2 = np.pi / 3  # 60 degrees
+        self.mixing_matrix1 = np.array([
+            [np.cos(theta1), -np.sin(theta1)],
+            [np.sin(theta1), np.cos(theta1)]
+        ])
+        self.mixing_matrix2 = np.array([
+            [np.cos(theta2), -np.sin(theta2)],
+            [np.sin(theta2), np.cos(theta2)]
+        ])
+
+        # Generate source signals
+        t = np.linspace(0, 10, self.n_samples)
+        source1 = np.sin(2 * np.pi * 2 * t)  # 2 Hz sine wave
+        source2 = np.sin(2 * np.pi * 5 * t)  # 5 Hz sine wave
+        self.sources = np.column_stack([source1, source2])
+
+        # Mix sources with different matrices for each half of the samples
+        self.X = np.zeros((self.n_samples, self.n_features))
+        mid_point = self.n_samples // 2
+        self.X[:mid_point] = self.sources[:mid_point] @ self.mixing_matrix1.T
+        self.X[mid_point:] = self.sources[mid_point:] @ self.mixing_matrix2.T
+
+    def test_init(self):
+        """Test model initialization"""
+        # Arrange
+        model = HMICA(
+            n_states=self.n_states,
+            n_sources=self.n_sources,
+            whiten=True,
+            use_gar=True,
+            gar_order=2,
+            max_iter={'hmm': 5, 'ica': 10},
+            random_state=42
+        )
+        # Act & Assert
+        self.assertEqual(model.n_states, self.n_states)
+        self.assertEqual(model.n_sources, self.n_sources)
+        self.assertTrue(model.whiten)
+        self.assertTrue(model.use_gar)
+        self.assertEqual(model.gar_order, 2)
+
+    def test_not_fitted(self):
+        """Test behavior before fitting"""
+        # Arrange
+        model = HMICA(
+            n_states=self.n_states,
+            n_sources=self.n_sources,
+            whiten=True,
+            use_gar=True,
+            gar_order=2,
+            max_iter={'hmm': 5, 'ica': 10},
+            random_state=42
+        )
+        X_test = np.random.randn(10, self.n_features)
+
+        # Act & Assert
+        self.assertFalse(hasattr(model, 'model_'))
+        self.assertFalse(hasattr(model, 'n_features_in_'))
+        self.assertFalse(hasattr(model, 'training_history_'))
+
+        with self.assertRaises(NotFittedError):
+            model.transform(X_test)
+        with self.assertRaises(NotFittedError):
+            model.inverse_transform(X_test, np.zeros((10, self.n_states)))
+
+    def test_fit(self):
+        """Test model fitting"""
+        # Arrange
+        model = HMICA(
+            n_states=self.n_states,
+            n_sources=self.n_sources,
+            whiten=True,
+            use_gar=True,
+            gar_order=2,
+            max_iter={'hmm': 5, 'ica': 10},
+            random_state=42
+        )
+        # Act
+        model.fit(self.X)
+        # Assert
+        self.assertIsNotNone(model.model_)
+        self.assertIsNotNone(model.training_history_)
+        self.assertEqual(model.n_features_in_, self.n_features)
+
+    def test_transform(self):
+        """Test source separation"""
+        # Arrange
+        model = HMICA(
+            n_states=self.n_states,
+            n_sources=self.n_sources,
+            whiten=True,
+            use_gar=True,
+            gar_order=2,
+            max_iter={'hmm': 5, 'ica': 10},
+            random_state=42
+        )
+        model.fit(self.X)
+
+        # Act
+        result = model.transform(self.X)
+
+        # Assert
+        self.assertIn('source_signals', result)
+        self.assertIn('state_sequence', result)
+
+        # Check shapes
+        source_signals = result['source_signals']
+        state_sequence = result['state_sequence']
+        self.assertEqual(source_signals.shape, (self.n_samples, self.n_sources))
+        self.assertEqual(state_sequence.shape, (self.n_samples, self.n_states))
+
+        # Check state sequence is one-hot encoded
+        self.assertTrue(np.allclose(np.sum(state_sequence, axis=1), 1.0))
+
+    def test_inverse_transform(self):
+        """Test reconstruction"""
+        # Arrange
+        model = HMICA(
+            n_states=self.n_states,
+            n_sources=self.n_sources,
+            whiten=True,
+            use_gar=True,
+            gar_order=2,
+            max_iter={'hmm': 5, 'ica': 10},
+            random_state=42
+        )
+        # Fit model and get sources
+        result = model.fit_transform(self.X)
+
+        # Act
+        X_reconstructed = model.inverse_transform(
+            result['source_signals'],
+            result['state_sequence']
+        )
+
+        # Assert
+        self.assertEqual(X_reconstructed.shape, self.X.shape)
+
+        # Check reconstruction error (should be relatively small)
+        reconstruction_error = np.mean((self.X - X_reconstructed) ** 2)
+        self.assertLess(reconstruction_error, 0.1)
+
+    def test_fit_transform(self):
+        """Test combined fit and transform"""
+        # Arrange
+        model = HMICA(
+            n_states=self.n_states,
+            n_sources=self.n_sources,
+            whiten=True,
+            use_gar=True,
+            gar_order=2,
+            max_iter={'hmm': 5, 'ica': 10},
+            random_state=42
+        )
+        # Act
+        result = model.fit_transform(self.X)
+        # Assert
+        self.assertIn('source_signals', result)
+        self.assertIn('state_sequence', result)
+        self.assertEqual(result['source_signals'].shape, (self.n_samples, self.n_sources))
+        self.assertEqual(result['state_sequence'].shape, (self.n_samples, self.n_states))
+
+    def test_score(self):
+        """Test model scoring"""
+        # Arrange
+        model = HMICA(
+            n_states=self.n_states,
+            n_sources=self.n_sources,
+            whiten=True,
+            use_gar=True,
+            gar_order=2,
+            max_iter={'hmm': 5, 'ica': 10},
+            random_state=42
+        )
+        model.fit(self.X)
+        # Act
+        score = model.score(self.X)
+        # Assert
+        self.assertIsInstance(score, float)
+
+        # Score should be higher for training data than random data
+        random_data = np.random.randn(*self.X.shape)
+        random_score = model.score(random_data)
+        self.assertGreater(score, random_score)
 
 if __name__ == '__main__':
     unittest.main()
