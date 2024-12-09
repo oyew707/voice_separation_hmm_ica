@@ -7,7 +7,6 @@ Email:   [your email address]
 -------------------------------------------------------
 """
 
-
 # Imports
 import os
 import shutil
@@ -15,7 +14,9 @@ import shutil
 # Constants
 mix_module = "/Users/einsteinoyewole/PycharmProjects/pywsj0-mix/generate_wsjmix.py"
 
-def generate_mix_sounds(dry_run=True, sources=[2, 3, 4], frequencies=[8000, 16000], wsj0_path="wsj0", ouput_path_prefix="wsj0-mix-{nsrc}mix-{sampling_freq}Hz"):
+
+def generate_mix_sounds(dry_run=True, sources=[2, 3, 4], frequencies=[8000, 16000], wsj0_path="wsj0",
+                        ouput_path_prefix="wsj0-mix-{nsrc}mix-{sampling_freq}Hz"):
     """
     -------------------------------------------------------
     Generate the mix sounds for the given sources and frequencies
@@ -43,6 +44,7 @@ def generate_mix_sounds(dry_run=True, sources=[2, 3, 4], frequencies=[8000, 1600
                 os.system(generate_mix_command)
     print('Done!')
 
+
 def move_wv_files(src, dest, dry_run=True):
     """
     -------------------------------------------------------
@@ -67,6 +69,7 @@ def move_wv_files(src, dest, dry_run=True):
                 shutil.copy(src_file, dest_file)
             else:
                 print(f"Moving {src_file} to {dest_file}")
+
 
 def convert_wv_files_to_wav(dir, dry_run=True):
     """

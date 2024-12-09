@@ -1,8 +1,100 @@
-# Voice Separation using Hidden Markov Independent Component analysis 
+# Hidden Markov Independent Component Analysis (HMICA)
 
-Document: [Link](https://docs.google.com/document/d/1BUl8Jnd-v2zFqgMAEvz9YW2oHm_f9Vh3z6mTCJG5L0M/edit?usp=sharing)
+A Python implementation of Hidden Markov Independent Component Analysis described in [Penny et al. (2000)](https://doi.org/10.1007/978-1-4471-0443-8_1). This implementation supports both standard ICA and Generalized Autoregressive (GAR) source modeling.
 
-## Audio mixing: WSJ0 dataset
+## Installation
+
+Install required packages using pip:
+```bash
+pip install -r requirements.txt
+```
+
+Required packages:
+- tensorflow >= 2.12.0
+- numpy >= 1.23.5
+- scipy >= 1.10.1
+- scikit-learn >= 1.2.2
+- tqdm >= 4.65.0
+- numpy>=1.26.4
+- soundfile>=0.12.1
+- fast-bss-eval>=0.1.3
+
+## Usage
+
+### Basic Example
+
+```python
+from HMICA import HMICA
+import numpy as np
+
+# Initialize model
+model = HMICA(
+    n_states=2,          # Number of HMM states
+    n_sources=2,         # Number of sources to extract
+    whiten=True,         # Whether to whiten input data
+    use_gar=True,        # Use Generalized AutoRegressive modeling
+    gar_order=2,         # Order of GAR model
+    random_state=42      # For reproducibility
+)
+
+# Fit and transform data
+X = np.random.randn(1000, 2)  # Your mixed signals
+result = model.fit_transform(X)
+
+# Access separated sources and state sequence
+sources = result['source_signals']      # Shape: [n_samples, n_sources]
+states = result['state_sequence']       # Shape: [n_samples, n_states]
+
+# Reconstruct original signals
+X_reconstructed = model.inverse_transform(sources, states)
+```
+
+### Advanced Configuration
+
+```python
+model = HMICA(
+    n_states=2,
+    n_sources=2,
+    whiten=True,
+    use_gar=True,
+    gar_order=2,
+    inference_method='viterbi',  # 'viterbi' or 'smoothing'
+    learning_rates={            # Learning rates for different parameters
+        'W': 1e-4,             # Unmixing matrix
+        'R': 1e-4,             # Shape parameter
+        'beta': 1e-4,          # Scale parameter
+        'C': 1e-4              # GAR coefficients
+    },
+    max_iter={                 # Maximum iterations
+        'hmm': 100,           # HMM optimization
+        'ica': 1000           # ICA optimization
+    },
+    tol={                     # Convergence tolerances
+        'hmm': 1e-4,         # HMM optimization
+        'ica': 1e-2          # ICA optimization
+    },
+    optimizer_patience=5,     # Early stopping patience
+    warmup_period=5,         # Initial iterations before convergence check
+    n_processes=None,        # Number of parallel processes (None=single process)
+    random_state=42
+)
+```
+
+## Evaluation Metrics
+
+The package includes two evaluation metrics:
+
+```python
+from evaluation import signal_to_noise_ratio, signal_to_distortion_ratio
+
+# Calculate SNR
+snr = signal_to_noise_ratio(original_sources, separated_sources)
+
+# Calculate SDR
+sdr = signal_to_distortion_ratio(original_sources, separated_sources)
+```
+
+## Audio Processing Example mixing: WSJ0 dataset
 - Data Source: [kaggle link](https://www.kaggle.com/datasets/stsword/wsj0original/discussion?sort=hotness)
 - Clone Mixing scrip: `git clone pywsj0-mix`
 - unzip the data: `unzip archive.zip`
