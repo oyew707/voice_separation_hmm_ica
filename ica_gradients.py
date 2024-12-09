@@ -24,17 +24,15 @@ class ICAGradients:
     or automatic differentiation
     -------------------------------------------------------
     Parameters:
-        ica_model - The ICA model instance
         use_analytical - Whether to use analytical gradients (bool)
     ------------------------------------------------
     """
 
-    def __init__(self, ica_model: ICA, use_analytical: bool = True):
-        self.ica = ica_model
+    def __init__(self, use_analytical: bool = True, **kwargs):
         self.use_analytical = use_analytical
 
     def compute_gradients(self, x: tf.Tensor, gamma_k: tf.Tensor,
-                          state: int) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor, Optional[tf.Tensor]]:
+                          state: int, ica_model: ICA) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor, Optional[tf.Tensor]]:
         """
         -------------------------------------------------------
         Computes gradients for all HMICA parameters using either method
@@ -43,6 +41,7 @@ class ICAGradients:
             x - Input mixed signals (tf.Tensor of shape [time_steps, x_dim])
             gamma_k - State responsibilities (tf.Tensor of shape [time_steps])
             state - Current state index (int)
+            ica_model - The ICA model instance
         Returns:
             W_grad - Gradient for unmixing matrix
             R_grad - Gradient for shape parameters
@@ -51,12 +50,12 @@ class ICAGradients:
         -------------------------------------------------------
         """
         if self.use_analytical:
-            return self._compute_analytical_gradients(x, gamma_k, state)
+            return self._compute_analytical_gradients(x, gamma_k, state, ica_model)
         else:
-            return self._compute_auto_gradients(x, gamma_k, state)
+            return self._compute_auto_gradients(x, gamma_k, state, ica_model)
 
     def _compute_analytical_gradients(self, x: tf.Tensor, gamma_k: tf.Tensor,
-                                      state: int) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor, Optional[tf.Tensor]]:
+                                      state: int, ica_model: ICA) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor, Optional[tf.Tensor]]:
         """
         -------------------------------------------------------
         Computes gradients using derived analytical formulas
@@ -65,13 +64,14 @@ class ICAGradients:
             x - Input mixed signals (tf.Tensor of shape [time_steps, x_dim])
             gamma_k - State responsibilities (tf.Tensor of shape [time_steps])
             state - Current state index (int)
+            ica_model - The ICA model instance
         Returns:
             Tuple of gradients (W, R, beta, C)
         -------------------------------------------------------
         """
         # Get current parameters and compute sources
-        W = self.ica.W[state]
-        sources = self.ica.get_sources(x, state)
+        W = ica_model.W[state]
+        sources = ica_model.get_sources(x, state)
         gamma_sum = tf.reduce_sum(gamma_k)
 
         # Unmixing matrix gradient
@@ -81,10 +81,10 @@ class ICAGradients:
         W_grad = tf.zeros_like(W)  # Shape: [x_dim, m]
 
         # Compute gradient elements according to paper formula
-        for i in range(self.ica.x_dim):  # Iterate over input dimensions
-            for j in range(self.ica.m):  # Iterate over sources
-                R_j = self.ica.ge[state].R[j]
-                beta_j = self.ica.ge[state].beta[j]
+        for i in range(ica_model.x_dim):  # Iterate over input dimensions
+            for j in range(ica_model.m):  # Iterate over sources
+                R_j = ica_model.ge[state].R[j]
+                beta_j = ica_model.ge[state].beta[j]
 
                 # Compute source terms for a_j[t]
                 abs_src = tf.abs(sources[:, j])
@@ -100,18 +100,18 @@ class ICAGradients:
                 W_grad = tf.tensor_scatter_nd_update(W_grad, [[i, j]], [upd])
 
         # Beta gradient (optimal value)
-        beta_grad = tf.zeros_like(self.ica.ge[state].beta)
-        for i in range(self.ica.m):
-            R_i = self.ica.ge[state].R[i]
+        beta_grad = tf.zeros_like(ica_model.ge[state].beta)
+        for i in range(ica_model.m):
+            R_i = ica_model.ge[state].R[i]
             abs_src_R = tf.pow(tf.abs(sources[:, i]), R_i)
             weighted_sum = tf.reduce_sum(gamma_k * abs_src_R)
             beta_grad = tf.tensor_scatter_nd_update(beta_grad, [[i]], [gamma_sum / (R_i * weighted_sum)])
 
         # R gradient
-        R_grad = tf.zeros_like(self.ica.ge[state].R)
-        for i in range(self.ica.m):
-            R_i = self.ica.ge[state].R[i]
-            beta_i = self.ica.ge[state].beta[i]
+        R_grad = tf.zeros_like(ica_model.ge[state].R)
+        for i in range(ica_model.m):
+            R_i = ica_model.ge[state].R[i]
+            beta_i = ica_model.ge[state].beta[i]
 
             # Digamma term = φ(1/R_i )=(Γ^′ (1/R_i ))/Γ(1/Ri )
             digamma_term = tf.math.digamma(1 / R_i)
@@ -134,8 +134,9 @@ class ICAGradients:
 
         return W_grad, R_grad, beta_grad, C_grad
 
-    def _compute_gar_gradients(self, sources: tf.Tensor, gamma_k: tf.Tensor,
-                               state: int) -> tf.Tensor:
+    @staticmethod
+    def _compute_gar_gradients(sources: tf.Tensor, gamma_k: tf.Tensor,
+                               state: int, ica_model: ICA) -> tf.Tensor:
         """
         -------------------------------------------------------
         Computes gradients for GAR coefficients analytically
@@ -144,20 +145,21 @@ class ICAGradients:
             sources - Source signals (tf.Tensor of shape [time_steps, x_dim])
             gamma_k - State responsibilities (tf.Tensor of shape [time_steps])
             state - Current state index (int)
+            ica_model - The ICA model instance
         Returns:
             C_grad - Gradient for GAR coefficients
         -------------------------------------------------------
         """
         gamma_sum = tf.reduce_sum(gamma_k)
-        C_grad = tf.zeros_like(self.ica.gar.C[state])
+        C_grad = tf.zeros_like(ica_model.gar.C[state])
 
         # Get prediction errors
-        errors = self.ica.gar.compute_prediction_error(sources, state)
+        errors = ica_model.gar.compute_prediction_error(sources, state)
 
-        for i in range(self.ica.m):
-            R_i = self.ica.ge[state].R[i]
+        for i in range(ica_model.m):
+            R_i = ica_model.ge[state].R[i]
 
-            for d in range(self.ica.gar.p):
+            for d in range(ica_model.gar.p):
                 # Get delayed source values
                 delayed_source = sources[:, i]  # sources[self.ica.gar.p - d - 1:-d - 1, i]
 
@@ -170,8 +172,9 @@ class ICAGradients:
 
         return C_grad
 
-    def _compute_auto_gradients(self, x: tf.Tensor, gamma_k: tf.Tensor,
-                                state: int) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor, Optional[tf.Tensor]]:
+    @staticmethod
+    def _compute_auto_gradients(x: tf.Tensor, gamma_k: tf.Tensor,
+                                state: int, ica_model: ICA) -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor, Optional[tf.Tensor]]:
         """
         -------------------------------------------------------
         Computes gradients using TensorFlow's automatic differentiation
@@ -180,30 +183,31 @@ class ICAGradients:
             x - Input mixed signals (tf.Tensor of shape [time_steps, x_dim])
             gamma_k - State responsibilities (tf.Tensor of shape [time_steps])
             state - Current state index (int)
+            ica_model - The ICA model instance (ICA)
         Returns:
             Tuple of gradients (W, R, beta, C)
         -------------------------------------------------------
         """
         watched_vars = [
-            self.ica.W[state],
-            self.ica.ge[state].R,
-            self.ica.ge[state].beta
+            ica_model.W[state],
+            ica_model.ge[state].R,
+            ica_model.ge[state].beta
         ]
 
-        if self.ica.use_gar:
-            watched_vars.append(self.ica.gar.C[state])
+        if ica_model.use_gar:
+            watched_vars.append(ica_model.gar.C[state])
 
         # disable automatic tracking, fine-grained control over which variables are watched
         with tf.GradientTape(watch_accessed_variables=False) as tape:
             for var in watched_vars:
                 tape.watch(var)
 
-            log_likelihood = self.ica.compute_log_likelihood(x, state)
+            log_likelihood = ica_model.compute_log_likelihood(x, state)
             weighted_ll = tf.reduce_sum(gamma_k * log_likelihood)
 
         grads = tape.gradient(weighted_ll, watched_vars)
 
         W_grad, R_grad, beta_grad = grads[:3]
-        C_grad = grads[3] if self.ica.use_gar else None
+        C_grad = grads[3] if ica_model.use_gar else None
 
         return W_grad, R_grad, beta_grad, C_grad
