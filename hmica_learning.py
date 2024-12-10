@@ -33,7 +33,7 @@ def timeit(func):
         result = func(*args, **kwargs)
         end_time = time.perf_counter()
         total_time = end_time - start_time
-        print(f'Function {func.__name__} Took {total_time:.4f} seconds')
+        # print(f'Function {func.__name__} Took {total_time:.4f} seconds')
         return result
 
     return timeit_wrapper
@@ -199,12 +199,12 @@ class HMICALearner:
                     new_ica_ll = self._compute_ica_likelihood(x, k, gamma_k)
                     if ica_iter >= self.warmup_steps and self.compute_convergence(new_ica_ll, old_ica_ll, init_ica_ll,
                                                                                   ica_tol):
-                        print(f'Converged ICA {k} {ica_iter} in {iteration + 1} iterations')
+                        # print(f'Converged ICA {k} {ica_iter} in {iteration + 1} iterations')
                         break
                     early_stop, patience, best_ica_ll = self._early_stopping(best_ica_ll, new_ica_ll,
                                                                              ica_iter, patience)
                     if early_stop:
-                        print(f'Early stop ICA {k} {ica_iter} in {iteration + 1} iterations')
+                        # print(f'Early stop ICA {k} {ica_iter} in {iteration + 1} iterations')
                         break
 
                     old_ica_ll = new_ica_ll
@@ -217,7 +217,7 @@ class HMICALearner:
             # Check HMM convergence
             new_hmm_ll = self._compute_total_likelihood(x, responsibilities, alpha_hat, beta_hat, c_t)
             if iteration > self.warmup_steps and self.compute_convergence(new_hmm_ll, old_hmm_ll, init_hmm_ll, hmm_tol):
-                print(f'Converged HMM in {iteration + 1} iterations')
+                # print(f'Converged HMM in {iteration + 1} iterations')
                 break
 
             old_hmm_ll = new_hmm_ll
@@ -467,7 +467,7 @@ class ParallelHMICALearner(HMICALearner):
             new_ica_ll = self._compute_ica_likelihood(x, state, gamma_k)
             if ica_iter >= self.warmup_steps and self.compute_convergence(new_ica_ll, old_ica_ll, init_ica_ll,
                                                                           self.ica_tol):
-                print(f'Converged ICA {state} in {ica_iter} iterations')
+                # print(f'Converged ICA {state} in {ica_iter} iterations')
                 break
             early_stop, patience, best_ica_ll = self._early_stopping(best_ica_ll, new_ica_ll, patience, self.ica_tol)
             if ica_iter >= self.warmup_steps and early_stop:
@@ -542,7 +542,7 @@ class ParallelHMICALearner(HMICALearner):
             # Check HMM convergence
             new_hmm_ll = self._compute_total_likelihood(x, responsibilities, alpha_hat, beta_hat, c_t)
             if iteration > self.warmup_steps and self.compute_convergence(new_hmm_ll, old_hmm_ll, init_hmm_ll, hmm_tol):
-                print(f'Converged HMM in {iteration + 1} iterations')
+                # print(f'Converged HMM in {iteration + 1} iterations')
                 break
 
             old_hmm_ll = new_hmm_ll
